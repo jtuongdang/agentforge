@@ -11,6 +11,11 @@ case "$(uname -s):$(uname -m)" in
 esac
 
 PYTHON="${PYTHON:-$ROOT/.venv/bin/python}"
+NUITKA_JOBS="${NUITKA_BUILD_JOBS:-2}"
+case "$NUITKA_JOBS" in
+  ''|*[!0-9]*) echo "NUITKA_BUILD_JOBS must be a positive integer." >&2; exit 2 ;;
+  0) echo "NUITKA_BUILD_JOBS must be at least 1." >&2; exit 2 ;;
+esac
 if [ ! -x "$PYTHON" ]; then
   if [ "$PYTHON" = "$ROOT/.venv/bin/python" ]; then
     python3 -m venv "$ROOT/.venv"
@@ -26,7 +31,7 @@ BUILD_DIR="$ROOT/.desktop-build/backend"
 mkdir -p "$OUT_DIR" "$BUILD_DIR"
 "$PYTHON" -m nuitka \
   --mode=onefile \
-  --jobs=2 \
+  --jobs="$NUITKA_JOBS" \
   --assume-yes-for-downloads \
   --output-dir="$BUILD_DIR" \
   --output-filename="devagent-backend-$TARGET" \

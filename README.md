@@ -32,6 +32,8 @@ The launcher creates `.venv`, installs the pinned Python requirements, starts Fa
 
 Install Node.js and Rust/Cargo on the build machine, then run `npm run desktop:dev` from `dashboard/` for the Tauri shell with a source Python backend. `npm run tauri build` runs the frontend build and `scripts/build_desktop_macos.sh`; that script compiles the backend into a self-contained Nuitka sidecar for the current macOS architecture. The packaged app uses a random loopback port and platform application data directory; the installed machine does not need Python, Node.js, or npm. Cross-architecture packages must be built separately on their target architecture.
 
+To limit build CPU usage, set `NUITKA_BUILD_JOBS=1 CARGO_BUILD_JOBS=1` before `npm run tauri build`; the Nuitka script defaults to two jobs when unset.
+
 ## Safety boundaries
 
 - Each task selects a base branch (defaulting to the repository's configured default); the Agent gets a dedicated worktree and a meaningful task branch such as `orchestrator/fix-phone-validation`. The checked-out project directory remains untouched, and uncommitted changes are never copied into the worktree.
@@ -44,10 +46,12 @@ Install Node.js and Rust/Cargo on the build machine, then run `npm run desktop:d
 - The Agents dashboard can check credential status and available quota where the CLI exposes it. It stores only status, timestamp, and safe quota fields; it never stores or displays token values. Copilot's CLI has no auth-only check, so its explicit check sends one short prompt and consumes one Copilot request.
 - Removing an Agent disables future scheduling while preserving task/run history and the local CLI login. The Agent can be restored from the dashboard. Removal is blocked while it owns active tasks.
 - Agent commands use configured adapters and capabilities. There are no hardcoded business roles.
-- Parallel tasks must have independent file scopes or a pre-approved contract; the scheduler reserves capacity per agent and creates a separate worktree for each task.
+- Parallel tasks must have independent file scopes or a pre-approved contract; the scheduler applies global run/build limits, shared executable credential limits and disk reservations, then creates a separate worktree for each admitted task. Lowering capacity drains active work without killing it.
+- The Fleet page persists local run/build limits, shows active owners and disk headroom, and does not guess RAM per worker.
 - On backend restart, queued tasks remain queued; interrupted execution is marked failed and an interrupted publish is blocked for manual remote review. Worktrees are retained.
 - `/api/health` checks SQLite integrity and reports scheduler, task, repository, and Agent availability counts. `scripts/db_snapshot.py` creates consistent SQLite backups and restores only to a new file, refusing to overwrite existing data.
 - Local API routes require a bearer token. The dashboard obtains it from the loopback-only `/api/session` endpoint; by default the token is stored as `api-token` in the app data directory with owner-only permissions on POSIX. WebSocket events use short-lived, one-time tickets. Do not include the token in task prompts or logs.
+- External Tech Lead sessions use a separate one-time owner pairing code, limited scopes, a 90-second renewable lease and an eight-hour maximum session. The session cannot publish, push, merge or approve a Draft PR; review decisions are stored with an audit record. `/api/health` does not imply a Tech Lead is connected.
 - Worktree cleanup is preview-only by default. `python scripts/cleanup_worktrees.py --apply` removes only aged, clean task worktrees whose commits are already ancestors of the selected base; dirty, ignored, untracked, handoff, and unmerged worktrees remain for review. Build folders are not deleted automatically.
 - The dashboard's **Storage** page shows SQLite/WAL size, worktree/build usage, managed data totals, record counts and free disk space. It refreshes when opened and every 30 seconds; it is read-only and does not clean up data automatically.
 - Before each Agent run, the Orchestrator injects [PROJECT_CONVENTIONS.md](docs/PROJECT_CONVENTIONS.md) and reads repository `AGENTS.md`/guidance files plus scoped ancestor instructions; the task package lists them and requires the Agent to report them.

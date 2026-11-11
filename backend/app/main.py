@@ -11,6 +11,7 @@ import stat
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -19,13 +20,14 @@ from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db
+from . import tech_lead
 from .engine import get_task, log_event, set_task
 from . import fleet as fleet_manager
 from .git_ops import (check_repository_sync, is_github_remote, list_repository_branches,
                       git_author, register_repository, repository, run, validate_repository_base,
                       validated_revision_is_current)
-from .models import (AgentCreate, CompleteHandoff, ContractCreate, FleetSettingsUpdate, RepositoryCreate,
-                     RepositoryPreflight, TaskCreate)
+from .models import (AgentCreate, CompleteHandoff, ContractCreate, FleetSettingsUpdate, LeadHandshake,
+                     LeadPairingCreate, LeadReview, RepositoryCreate, RepositoryPreflight, TaskCreate)
 from .contracts import ContractManager
 from .orchestrator import Orchestrator
 from .settings import settings
@@ -121,7 +123,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="DevAgent Orchestrator", version="0.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=sorted(ALLOWED_ORIGINS),
-                   allow_credentials=False, allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+                   allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
                    allow_headers=["Content-Type", "Authorization"])
 
 
@@ -134,6 +136,14 @@ async def require_local_api_token(request, call_next):
             from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "Local API host is not allowed"}, status_code=403)
         supplied = request.headers.get("authorization", "")
+        if request.url.path == "/api/lead/handshake":
+            return await call_next(request)
+        if request.url.path.startswith("/api/lead/client/"):
+            session = tech_lead.authorize(supplied.removeprefix("Bearer "))
+            if session is None:
+                from fastapi.responses import JSONResponse
+                return JSONResponse({"detail": "Active Tech Lead session required"}, status_code=401)
+            return await call_next(request)
         expected = f"Bearer {_local_api_token()}"
         if not hmac.compare_digest(supplied, expected):
             from fastapi.responses import JSONResponse
@@ -158,6 +168,122 @@ def websocket_ticket():
     ticket = secrets.token_urlsafe(24)
     _ws_tickets[ticket] = now + 30
     return {"ticket": ticket}
+
+
+def _lead_client_session(request: Request, scope: str | None = None) -> dict:
+    supplied = request.headers.get("authorization", "").removeprefix("Bearer ")
+    session = tech_lead.authorize(supplied, scope)
+    if session is None:
+        raise HTTPException(403, "Tech Lead session does not hold the required scope or lease")
+    return session
+
+
+@app.get("/api/lead/contract")
+def lead_contract():
+    return {"version": tech_lead.CONTRACT_VERSION, "pairing_ttl_seconds": tech_lead.PAIRING_TTL_SECONDS,
+            "lease_ttl_seconds": tech_lead.LEASE_TTL_SECONDS, "session_ttl_seconds": tech_lead.SESSION_TTL_SECONDS,
+            "scopes": sorted(tech_lead.ALLOWED_SCOPES),
+            "client_endpoints": {"handshake": "POST /api/lead/handshake", "heartbeat": "POST /api/lead/client/heartbeat",
+                                 "handover": "GET /api/lead/client/handover", "create_task": "POST /api/lead/client/tasks",
+                                 "task_diff": "GET /api/lead/client/tasks/{task_id}/diff",
+                                 "review": "POST /api/lead/client/tasks/{task_id}/reviews"},
+            "publication": "Not available to Tech Lead sessions; local operator approval is required."}
+
+
+@app.get("/api/lead/status")
+def lead_status():
+    return tech_lead.status()
+
+
+@app.post("/api/lead/pairing", status_code=201)
+def create_lead_pairing(body: LeadPairingCreate):
+    try:
+        result = tech_lead.create_pairing(body.scopes)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    db.event(None, "tech_lead_pairing_created", "Short-lived Tech Lead pairing code created.",
+             {"scopes": result["scopes"], "expires_at": result["expires_at"]})
+    return result
+
+
+@app.post("/api/lead/handshake", status_code=201)
+def lead_handshake(body: LeadHandshake):
+    try:
+        return tech_lead.handshake(body.pairing_code, body.client_id, body.client_name, body.requested_scopes)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/lead/sessions/{session_id}/revoke")
+def revoke_lead_session(session_id: str):
+    if not tech_lead.revoke(session_id):
+        raise HTTPException(404, "Active Tech Lead session not found")
+    return tech_lead.status()
+
+
+@app.post("/api/lead/client/heartbeat")
+def lead_heartbeat(request: Request):
+    session = _lead_client_session(request)
+    supplied = request.headers.get("authorization", "").removeprefix("Bearer ")
+    result = tech_lead.heartbeat(supplied)
+    if result is None or result["session_id"] != session["id"]:
+        raise HTTPException(409, "Tech Lead control lease expired or was revoked")
+    return result
+
+
+@app.get("/api/lead/client/handover")
+def lead_handover(request: Request):
+    _lead_client_session(request, "handover:read")
+    statuses = ("planning", "assigned", "running", "validating", "recovering", "handoff_ready",
+                "awaiting_pr_approval", "publishing", "waiting_for_contract", "waiting_for_scope")
+    marks = ",".join("?" for _ in statuses)
+    with db.connect() as con:
+        rows = con.execute(f"""SELECT t.id FROM tasks t WHERE t.status IN ({marks})
+            ORDER BY CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+            t.created_at,t.id""", statuses).fetchall()
+        contract_rows = con.execute("SELECT id,title,body,version,state,approved_at FROM contracts WHERE state='approved' ORDER BY title").fetchall()
+    snapshot_tasks = [task_row(row["id"]) for row in rows]
+    return {"contract_version": tech_lead.CONTRACT_VERSION, "generated_at": datetime.now(timezone.utc).isoformat(),
+            "tasks": snapshot_tasks,
+            "pending_review": [task for task in snapshot_tasks if task["status"] == "awaiting_pr_approval"],
+            "contracts": [dict(row) for row in contract_rows], "fleet": fleet_status()}
+
+
+@app.post("/api/lead/client/tasks", status_code=202)
+def lead_create_task(body: TaskCreate, request: Request):
+    session = _lead_client_session(request, "task:create")
+    task = create_task(body)
+    db.event(task["id"], "tech_lead_task_created", "Task created by the active Tech Lead session.",
+             {"session_id": session["id"], "client_id": session["client_id"]})
+    return task
+
+
+@app.get("/api/lead/client/tasks/{task_id}/diff")
+def lead_task_diff(task_id: str, request: Request, offset: int = Query(default=0, ge=0),
+                   limit: int = Query(default=250_000, ge=1, le=250_000)):
+    session = _lead_client_session(request, "task:review")
+    task_row(task_id)
+    db.event(task_id, "tech_lead_diff_accessed", "Tech Lead reviewed the task diff.", {"session_id": session["id"]})
+    return task_diff_preview(task_id, offset, limit)
+
+
+@app.post("/api/lead/client/tasks/{task_id}/reviews", status_code=201)
+def lead_review_task(task_id: str, body: LeadReview, request: Request):
+    session = _lead_client_session(request, "task:review")
+    task_row(task_id)
+    return tech_lead.record_review(task_id, session["id"], body.decision, body.comments)
+
+
+@app.get("/api/tasks/{task_id}/reviews")
+def task_reviews(task_id: str):
+    task_row(task_id)
+    return tech_lead.reviews(task_id)
 
 
 def decode_task(row: dict) -> dict:

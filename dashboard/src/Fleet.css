@@ -11,3 +11,13 @@
 .dependency-flow>div>small{font-size:9px;text-transform:uppercase;color:#8995a5;font-weight:700}
 .dependency-flow>div>span{display:grid;gap:5px;padding:8px;background:#f7f9fc;border-radius:6px;font-size:10px;overflow-wrap:anywhere}
 .dependency-flow>.badge{width:max-content}
+.tech-lead-panel{margin-top:16px;padding:18px}
+.tech-lead-session{display:grid;justify-items:start;gap:8px}
+.tech-lead-session>b{font-size:12px;color:#34465c}
+.tech-lead-session>small,.lead-pairing small{font-size:9px;color:#8995a5;line-height:1.5}
+.tech-lead-session>p{font-size:11px;color:#738197;margin:0 0 3px}
+.lead-pairing{display:grid;gap:10px;margin-top:17px;padding-top:15px;border-top:1px solid #edf0f4}
+.lead-pairing>div{display:grid;gap:4px}
+.lead-pairing>code{font:12px ui-monospace,monospace;overflow-wrap:anywhere;padding:10px;background:#f7f9fc;border:1px solid #e8edf2;border-radius:6px;color:#2e5eaa}
+.lead-pairing>label{display:grid;gap:5px;font-size:10px;font-weight:700;color:#536277}
+.lead-pairing textarea{width:100%;border:1px solid #dfe5ec;border-radius:6px;padding:9px;color:#304158;font:10px ui-monospace,monospace;line-height:1.5;resize:vertical}

@@ -60,7 +60,7 @@ def backup_before_migration() -> Path | None:
     with sqlite3.connect(DB_PATH, timeout=20) as source:
         version = source.execute("PRAGMA user_version").fetchone()[0]
         tables = source.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
-        if version >= 2 or tables == 0:
+        if version >= 3 or tables == 0:
             return None
         backup_dir = DB_PATH.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -118,6 +118,21 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS system_settings (
             key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS lead_sessions (
+            id TEXT PRIMARY KEY, client_id TEXT NOT NULL, client_name TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE, scopes TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL, last_seen TEXT NOT NULL, expires_at TEXT NOT NULL,
+            revoked_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS lead_lease (
+            id INTEGER PRIMARY KEY CHECK(id=1), session_id TEXT NOT NULL REFERENCES lead_sessions(id),
+            expires_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS lead_reviews (
+            id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
+            session_id TEXT NOT NULL REFERENCES lead_sessions(id), decision TEXT NOT NULL,
+            comments TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, created_at);
         CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
         """)
@@ -150,7 +165,7 @@ def init_db() -> None:
         for name, declaration in migrations.items():
             if name not in columns:
                 con.execute(f"ALTER TABLE agents ADD COLUMN {name} {declaration}")
-        con.execute("PRAGMA user_version=2")
+        con.execute("PRAGMA user_version=3")
 
 
 def event(task_id: str | None, kind: str, message: str, details: Any = None, agent_id: str | None = None) -> None:

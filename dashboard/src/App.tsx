@@ -42,6 +42,9 @@ type Nav = 'Overview' | 'Tasks' | 'Agents' | 'Contracts' | 'History' | 'Storage'
 type StorageMetrics = { measured_at: string; data_bytes: number; categories: Record<string, number>; database_files: Record<string, number>; sqlite_logical_bytes: number; sqlite_unused_bytes: number; disk: { total_bytes: number; free_bytes: number; used_percent: number }; counts: { repositories: number; agents: number; tasks: number; runs: number; events: number; active_tasks: number } }
 type FleetSettings = { max_active_runs: number; max_parallel_builds: number; max_per_credential: number; min_free_disk_bytes: number; disk_reserve_per_run_bytes: number }
 type FleetSnapshot = { settings: FleetSettings; active_runs: { task_id: string; title: string; status: string; assigned_agent_id?: string; agent_name?: string; repository_name?: string; run_id?: string }[]; active_run_count: number; queued_tasks: number; draining: boolean; builds_active: number; disk: { free_bytes: number; required_reserve_bytes: number; can_admit_run: boolean } }
+type LeadStatus = { connected: boolean; session: { session_id: string; client_id: string; client_name: string; scopes: string[]; lease_expires_at: string; session_expires_at: string } | null }
+type LeadPairing = { pairing_code: string; expires_at: string; contract_version: number; scopes: string[] }
+type LeadContract = { version: number; lease_ttl_seconds: number; session_ttl_seconds: number; client_endpoints: Record<string,string>; publication: string }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const token = await getApiToken()
@@ -84,6 +87,10 @@ function App() {
   const [storageBusy, setStorageBusy] = useState(false)
   const [fleet, setFleet] = useState<FleetSnapshot | null>(null)
   const [fleetBusy, setFleetBusy] = useState(false)
+  const [leadStatus, setLeadStatus] = useState<LeadStatus|null>(null)
+  const [leadPairing, setLeadPairing] = useState<LeadPairing|null>(null)
+  const [leadPrompt, setLeadPrompt] = useState('')
+  const [leadBusy, setLeadBusy] = useState(false)
   const [busyAgentId, setBusyAgentId] = useState<string | null>(null)
   const [taskRepositoryId, setTaskRepositoryId] = useState('')
   const [taskBaseBranch, setTaskBaseBranch] = useState('')
@@ -101,10 +108,11 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [a, r, t, c, h, f] = await Promise.all([
-        api<Agent[]>('/agents'), api<Repo[]>('/repositories'), api<Task[]>('/tasks'), api<Contract[]>('/contracts'), api<{ok:boolean}>('/health'), api<FleetSnapshot>('/fleet'),
+      const [a, r, t, c, h, f, lead] = await Promise.all([
+        api<Agent[]>('/agents'), api<Repo[]>('/repositories'), api<Task[]>('/tasks'), api<Contract[]>('/contracts'), api<{ok:boolean}>('/health'), api<FleetSnapshot>('/fleet'), api<LeadStatus>('/lead/status'),
       ])
-      setAgents(a); setRepos(r); setTasks(t); setContracts(c); setHealth(h); setFleet(f)
+      setAgents(a); setRepos(r); setTasks(t); setContracts(c); setHealth(h); setFleet(f); setLeadStatus(lead)
+      if (lead.connected) { setLeadPairing(null); setLeadPrompt('') }
       setSelected(current => current ? t.find(task => task.id === current.id) ?? current : null)
       setError('')
     } catch (e) { setError(e instanceof Error ? e.message : 'API connection failed') }
@@ -250,6 +258,29 @@ function App() {
     finally { setFleetBusy(false) }
   }
 
+  const createLeadPairing = async () => {
+    setLeadBusy(true)
+    try {
+      const [pairing,contract,base] = await Promise.all([
+        api<LeadPairing>('/lead/pairing',{method:'POST',body:JSON.stringify({scopes:['handover:read','task:create','task:review']})}),
+        api<LeadContract>('/lead/contract'), getApiBase().then(base=>base||location.origin),
+      ])
+      setLeadPairing(pairing)
+      setLeadPrompt(`Connect as the External Tech Lead using API contract v${contract.version}. Base URL: ${base}.\n\nUse the one-time pairing code shown separately in the Orchestrator UI. Send POST ${contract.client_endpoints.handshake} with client_id, client_name, pairing_code, and scopes ${JSON.stringify(pairing.scopes)}. Keep the returned session token in memory only. POST ${contract.client_endpoints.heartbeat} every 30 seconds to maintain the 90-second control lease. Read current work from ${contract.client_endpoints.handover}. You may create scoped tasks with ${contract.client_endpoints.create_task} and record auditable review decisions with ${contract.client_endpoints.review}. Do not publish, push, merge, or request broader scopes; ${contract.publication}`)
+      setError('')
+    } catch(e) { setError(e instanceof Error?e.message:'Could not create Tech Lead pairing') }
+    finally { setLeadBusy(false) }
+  }
+
+  const revokeLead = async () => {
+    const sessionId=leadStatus?.session?.session_id
+    if (!sessionId) return
+    setLeadBusy(true)
+    try { await api(`/lead/sessions/${sessionId}/revoke`,{method:'POST'}); setLeadPairing(null); setLeadPrompt(''); await refresh() }
+    catch(e) { setError(e instanceof Error?e.message:'Could not revoke Tech Lead') }
+    finally { setLeadBusy(false) }
+  }
+
   const removeAgent = async (agent: Agent) => {
     if (!window.confirm(`Gỡ ${agent.name} khỏi lịch phân công? Lịch sử được giữ lại; CLI và đăng nhập trên máy không bị gỡ.`)) return
     setBusyAgentId(agent.id)
@@ -317,7 +348,7 @@ function App() {
         {nav === 'Contracts' && <div className="panel"><div className="panel-heading"><div><h2>Shared interfaces</h2><p>Approve contracts before dependent tasks can execute.</p></div></div>{contracts.length ? contracts.map(c => <div className="contract-row" key={c.id}><div className="contract-icon">⌘</div><div className="contract-content"><div><b>{c.title}</b><span className={`badge ${c.state === 'approved' ? 'success' : 'warning'}`}>{c.state}</span></div><p>{c.body}</p><small>v{c.version} · {c.id}</small></div>{c.state === 'proposed' && <button className="button secondary" onClick={() => void approveContract(c.id)}>Approve contract</button>}</div>) : <Empty title="No interface contracts" text="Propose shared API or data decisions before scheduling dependent work."/>}</div>}
         {nav === 'History' && <History tasks={tasks.filter(t => ['draft_pr', 'completed', 'failed', 'blocked', 'cancelled'].includes(t.status))} onSelect={setSelected}/>}
         {nav === 'Storage' && <StoragePage metrics={storage} error={storageError} busy={storageBusy} onRefresh={() => void refreshStorage()}/>}
-        {nav === 'Fleet' && <FleetPage fleet={fleet} busy={fleetBusy} onSave={saveFleetSettings}/>}
+        {nav === 'Fleet' && <FleetPage fleet={fleet} busy={fleetBusy} onSave={saveFleetSettings} leadStatus={leadStatus} pairing={leadPairing} prompt={leadPrompt} leadBusy={leadBusy} onCreatePairing={createLeadPairing} onRevokeLead={revokeLead}/>}
       </div>
     </main>
     {selected && nav !== 'Tasks' && <TaskDrawer key={selected.id} task={selected} tasks={tasks} events={events} onClose={() => setSelected(null)} onApprove={() => setApproval(selected)} onCompleteLocal={() => void completeLocally(selected)} onCancel={() => void cancel(selected)} onHandoff={() => void handoff(selected)}/>}
@@ -429,7 +460,7 @@ function TaskActivity({events}:{events:EventRow[]}) {
   return <div className="task-details"><div className="detail-section"><h3>Live activity <span className="live-indicator"/></h3><div className="timeline">{events.slice(-200).map(event=><div className="event-row" key={event.id}><span className="event-dot"/><div><b>{event.kind.replaceAll('_',' ')}</b><p>{event.message}</p><small>{date(event.created_at)}</small></div></div>)}</div></div></div>
 }
 
-function FleetPage({fleet,busy,onSave}:{fleet:FleetSnapshot|null;busy:boolean;onSave:(settings:FleetSettings)=>void}) {
+function FleetPage({fleet,busy,onSave,leadStatus,pairing,prompt,leadBusy,onCreatePairing,onRevokeLead}:{fleet:FleetSnapshot|null;busy:boolean;onSave:(settings:FleetSettings)=>void;leadStatus:LeadStatus|null;pairing:LeadPairing|null;prompt:string;leadBusy:boolean;onCreatePairing:()=>void;onRevokeLead:()=>void}) {
   if (!fleet) return <div className="panel storage-loading">Loading fleet status…</div>
   const submit = (event:FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -459,6 +490,10 @@ function FleetPage({fleet,busy,onSave}:{fleet:FleetSnapshot|null;busy:boolean;on
       <div className="panel"><div className="panel-heading"><div><h2>Active runs</h2><p>Current worker and task ownership.</p></div></div>
         {fleet.active_runs.length ? <div className="fleet-run-list">{fleet.active_runs.map(run => <div className="fleet-run" key={run.task_id}><div><b>{run.title}</b><small>{run.repository_name || 'Repository'} · {run.agent_name || 'Agent pending'}</small><small>{run.task_id.slice(0,8)}{run.run_id ? ` · run ${run.run_id.slice(0,8)}` : ''}</small></div><Status status={run.status}/></div>)}</div> : <Empty title="No active runs" text="New tasks will use the current resource limits."/>}
       </div>
+    </section>
+    <section className="panel tech-lead-panel"><div className="panel-heading"><div><h2>External Tech Lead</h2><p>Separate scoped session and renewable control lease. Local API health does not imply a connected Tech Lead.</p></div><span className={`agent-state ${leadStatus?.connected?'available':'disabled'}`}>{leadStatus?.connected?'CONNECTED':'DISCONNECTED'}</span></div>
+      {leadStatus?.connected && leadStatus.session ? <div className="tech-lead-session"><b>{leadStatus.session.client_name}</b><small>Client {leadStatus.session.client_id} · lease until {date(leadStatus.session.lease_expires_at)}</small><div className="chips">{leadStatus.session.scopes.map(scope=><span key={scope}>{scope}</span>)}</div><button className="button danger-outline" disabled={leadBusy} onClick={onRevokeLead}>{leadBusy?'Revoking…':'Revoke control lease'}</button></div> : <div className="tech-lead-session"><p>No external lead holds the lease. Generate a one-time pairing code for a local CLI or bridge.</p><button className="button primary" disabled={leadBusy} onClick={onCreatePairing}>{leadBusy?'Preparing…':'Generate Tech Lead pairing'}</button></div>}
+      {pairing && <div className="lead-pairing"><div><b>One-time pairing code</b><small>Contract v{pairing.contract_version} · expires {date(pairing.expires_at)} · {pairing.scopes.join(', ')}</small></div><code>{pairing.pairing_code}</code><label>Activation prompt<textarea readOnly rows={7} value={prompt} onFocus={event=>event.currentTarget.select()}/></label><small>Paste the prompt into the local agent and provide the code through its pairing flow. The code expires in five minutes and can be used once.</small></div>}
     </section>
     <div className="storage-note">RAM is not shown as a fixed worker estimate. This page reports configured concurrency and live disk headroom.</div>
   </div>

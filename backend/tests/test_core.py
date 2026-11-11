@@ -29,9 +29,10 @@ def test_local_api_requires_token_and_limits_session_bootstrap_origin(monkeypatc
         session = client.get("/api/session", headers={"Origin": "http://127.0.0.1:5173"})
         assert session.status_code == 200
         assert session.json()["access_token"] == "fixture-local-api-token"
-        preflight = client.options("/api/health", headers={"Origin": "http://127.0.0.1:5173",
-            "Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": "authorization"})
+        preflight = client.options("/api/fleet", headers={"Origin": "http://127.0.0.1:5173",
+            "Access-Control-Request-Method": "PATCH", "Access-Control-Request-Headers": "authorization,content-type"})
         assert preflight.status_code == 200
+        assert "PATCH" in preflight.headers["access-control-allow-methods"]
         assert client.get("/api/ws-ticket").status_code == 401
         assert client.get("/api/ws-ticket", headers={"Authorization": "Bearer fixture-local-api-token",
             "Origin": "http://127.0.0.1:5173"}).status_code == 200
@@ -74,6 +75,77 @@ def test_websocket_reconnect_replays_events_from_last_cursor(tmp_path, monkeypat
                                      headers={"Origin": "http://127.0.0.1:5173"}) as socket:
             third = socket.receive_json()
         assert third["kind"] == "third"
+
+
+def test_tech_lead_pairing_scopes_lease_heartbeat_and_revoke(tmp_path, monkeypatch):
+    from app import tech_lead
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "lead.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    pairing = tech_lead.create_pairing(["handover:read", "task:create", "task:review"])
+    session = tech_lead.handshake(pairing["pairing_code"], "client-1", "Fixture Lead")
+    assert session["access_token"]
+    assert tech_lead.authorize(session["access_token"], "task:create")["id"] == session["session_id"]
+    assert tech_lead.authorize(session["access_token"], "task:publish") is None
+    assert tech_lead.status()["connected"] is True
+    assert tech_lead.heartbeat(session["access_token"])["session_id"] == session["session_id"]
+
+    with db.connect() as con:
+        row = con.execute("SELECT token_hash,state FROM lead_sessions WHERE id=?", (session["session_id"],)).fetchone()
+    assert row["token_hash"] != session["access_token"]
+    assert row["state"] == "active"
+    with pytest.raises(RuntimeError):
+        other = tech_lead.create_pairing(["handover:read"])
+        tech_lead.handshake(other["pairing_code"], "client-2", "Other Lead")
+    with pytest.raises(ValueError):
+        tech_lead.create_pairing(["task:publish"])
+
+    assert tech_lead.revoke(session["session_id"]) is True
+    assert tech_lead.status()["connected"] is False
+    assert tech_lead.authorize(session["access_token"]) is None
+
+
+def test_tech_lead_api_uses_separate_scoped_token_and_audits_reviews(tmp_path, monkeypatch):
+    from app import tech_lead
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "lead-api.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    repo = tmp_path / "lead-fixture"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    (repo / "README.md").write_text("fixture", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "-m", "initial"], check=True, capture_output=True)
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path,default_branch) VALUES('r','fixture',?,'main')", (str(repo),))
+
+    client = authenticated_test_client(monkeypatch)
+    pairing = client.post("/api/lead/pairing", json={"scopes": ["handover:read", "task:create", "task:review"]})
+    assert pairing.status_code == 201
+    handshake = client.post("/api/lead/handshake", json={"pairing_code": pairing.json()["pairing_code"],
+        "client_id": "fixture-client", "client_name": "Fixture Lead"})
+    assert handshake.status_code == 201
+    lead_token = handshake.json()["access_token"]
+    lead_headers = {"Authorization": f"Bearer {lead_token}"}
+    assert client.get("/api/lead/client/handover", headers=lead_headers).status_code == 200
+    assert client.get("/api/fleet", headers=lead_headers).status_code == 401
+
+    created = client.post("/api/lead/client/tasks", headers=lead_headers, json={
+        "title": "Scoped lead task", "objective": "Create a fixture task under lead scope.", "repository_id": "r",
+        "file_globs": ["README.md"], "required_capabilities": ["implementation"]})
+    assert created.status_code == 202, created.text
+    task_id = created.json()["id"]
+    review = client.post(f"/api/lead/client/tasks/{task_id}/reviews", headers=lead_headers,
+                         json={"decision": "request_changes", "comments": "Clarify expected behavior."})
+    assert review.status_code == 201
+    assert client.get(f"/api/tasks/{task_id}/reviews").json()[0]["decision"] == "request_changes"
+
+    revoked = client.post(f"/api/lead/sessions/{handshake.json()['session_id']}/revoke")
+    assert revoked.status_code == 200
+    assert client.post("/api/lead/client/heartbeat", headers=lead_headers).status_code == 401
 
 
 def test_task_planner_keeps_the_declared_file_boundary():
@@ -327,7 +399,7 @@ def test_db_schema_migration_is_versioned_and_backed_up(tmp_path, monkeypatch):
     db.init_db()
 
     with db.connect() as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 3
         assert "base_sha" in {row[1] for row in con.execute("PRAGMA table_info(tasks)")}
     backups = list((tmp_path / "backups").glob("pre-migration-v0-*.sqlite3"))
     assert len(backups) == 1

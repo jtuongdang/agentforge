@@ -115,3 +115,19 @@ class FleetSettingsUpdate(BaseModel):
     min_free_disk_bytes: int | None = Field(default=None, ge=256 * 1024**2, le=1024**4)
     disk_reserve_per_run_bytes: int | None = Field(default=None, ge=64 * 1024**2, le=1024**4)
 
+
+class LeadPairingCreate(BaseModel):
+    scopes: list[str] = Field(default_factory=lambda: ["handover:read"])
+
+
+class LeadHandshake(BaseModel):
+    pairing_code: str = Field(min_length=20, max_length=128)
+    client_id: str = Field(min_length=1, max_length=160)
+    client_name: str = Field(min_length=1, max_length=160)
+    requested_scopes: list[str] | None = None
+
+
+class LeadReview(BaseModel):
+    decision: str = Field(pattern="^(approve|request_changes|comment)$")
+    comments: str = Field(default="", max_length=30000)
+
