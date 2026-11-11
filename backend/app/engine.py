@@ -18,7 +18,8 @@ from .validation import ValidationEngine
 from .worktrees import GitWorktreeManager
 from .planner import TaskPlanner
 from .project_guidance import load_project_guidance
-from .processes import create_managed_process, process_group_options, terminate_process_tree
+from .processes import (create_managed_process, process_group_options, terminate_process_tree,
+                        wait_for_process_exit)
 from .registry import AgentRegistry
 from .writer_leases import WriterLeaseManager
 
@@ -419,7 +420,7 @@ class AgentExecutionEngine:
                         log_event(task_id, "agent_log", self._event_summary(decoded), agent_id=agent["id"])
             reader_task = asyncio.create_task(stream_output())
             try:
-                await asyncio.wait_for(proc.wait(), timeout=3600)
+                await asyncio.wait_for(wait_for_process_exit(proc), timeout=3600)
             except asyncio.TimeoutError:
                 await terminate_process_tree(proc)
                 reader_task.cancel()

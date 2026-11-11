@@ -2100,8 +2100,7 @@ def test_agent_invoke_stops_descendants_after_worker_exits(tmp_path, monkeypatch
 
     marker = tmp_path / "orphan-wrote-after-worker-exit"
     child_code = ("import pathlib,time; time.sleep(0.7); pathlib.Path(%r).write_text('survived')") % str(marker)
-    parent_code = ("import subprocess,sys; subprocess.Popen([sys.executable,'-c',%r], "
-                   "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); print('done')") % child_code
+    parent_code = ("import subprocess,sys; subprocess.Popen([sys.executable,'-c',%r]); print('done')") % child_code
 
     async def scenario():
         engine = object.__new__(AgentExecutionEngine)
@@ -2114,6 +2113,30 @@ def test_agent_invoke_stops_descendants_after_worker_exits(tmp_path, monkeypatch
 
     assert asyncio.run(scenario()) == 0
     assert not marker.exists()
+
+
+def test_validation_stops_descendants_after_worker_exits(tmp_path):
+    import asyncio
+    import sys
+    from app.validation import run_configured_validation
+
+    ready = tmp_path / "validator-descendant-ready"
+    marker = tmp_path / "validator-descendant-survived"
+    child_code = ("import pathlib,time; pathlib.Path(%r).write_text('ready'); time.sleep(0.8); "
+                  "pathlib.Path(%r).write_text('survived')") % (str(ready), str(marker))
+    parent_code = ("import pathlib,subprocess,sys,time; subprocess.Popen([sys.executable,'-c',%r]); "
+                   "deadline=time.monotonic()+5\n"
+                   "while not pathlib.Path(%r).exists() and time.monotonic()<deadline: time.sleep(0.01)\n"
+                   "print('validation complete')") % (child_code, str(ready))
+    async def scenario():
+        return await run_configured_validation(str(tmp_path), [sys.executable, "-c", parent_code],
+                                               lambda *_event: None)
+
+    result = asyncio.run(scenario())
+    assert result["passed"] is True
+    assert "validation complete" in result["tail"]
+    asyncio.run(asyncio.sleep(0.9))
+    assert not marker.exists(), "validator descendant survived the completed validation"
 
 
 def test_dashboard_static_mount_serves_spa(monkeypatch):

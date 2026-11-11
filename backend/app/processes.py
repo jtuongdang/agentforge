@@ -116,6 +116,13 @@ async def create_managed_process(*args, **kwargs) -> asyncio.subprocess.Process:
         raise
 
 
+async def wait_for_process_exit(process: asyncio.subprocess.Process) -> int:
+    """Wait for the root PID, without waiting for inherited pipes to reach EOF."""
+    while process.returncode is None:
+        await asyncio.sleep(0.02)
+    return process.returncode
+
+
 async def terminate_process_tree(process: asyncio.subprocess.Process, grace_seconds: float = 3.0) -> None:
     """Ask a subprocess tree to stop, then force-stop its process group if needed."""
     if not getattr(process, "pid", None):

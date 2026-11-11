@@ -7,7 +7,8 @@ import shutil
 import subprocess
 import asyncio
 from pathlib import Path
-from .processes import create_managed_process, process_group_options, terminate_process_tree
+from .processes import (create_managed_process, process_group_options, terminate_process_tree,
+                        wait_for_process_exit)
 
 SECRET_PATTERNS = [
     # Match literal values assigned to credential-like keys. Do not treat normal
@@ -151,7 +152,7 @@ async def run_configured_validation(worktree: str, command: list[str], log) -> d
 
     reader = asyncio.create_task(stream())
     try:
-        code = await asyncio.wait_for(proc.wait(), timeout=1200)
+        code = await asyncio.wait_for(wait_for_process_exit(proc), timeout=1200)
         await terminate_process_tree(proc, grace_seconds=0.25)
         await reader
     except asyncio.TimeoutError:
@@ -198,7 +199,7 @@ async def run_maven_verify(worktree: str, log) -> dict:
                     log("build", clean[-1500:])
         reader = asyncio.create_task(stream())
         try:
-            code = await asyncio.wait_for(proc.wait(), timeout=1200)
+            code = await asyncio.wait_for(wait_for_process_exit(proc), timeout=1200)
             await terminate_process_tree(proc, grace_seconds=0.25)
             await reader
         except asyncio.TimeoutError:
