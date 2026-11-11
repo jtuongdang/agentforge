@@ -282,6 +282,8 @@ Tách thành bốn subphase có thể phát hành độc lập:
 
 **Điều kiện hoàn thành:** từng subphase có artifact và test matrix riêng; không mất dữ liệu khi update/restore/revoke; không ghi key vào DB/log; cloud license không nhận source code; hành vi offline và provider cloud được mô tả chính xác.
 
+**Tiến độ Phase 7A (12/11/2026):** đã thêm build script sidecar chạy theo host cho macOS arm64/x86_64 và Windows x64, đặt mặc định một Nuitka job và chặn tối đa hai; Tauri dùng bundle target mặc định theo OS. Workflow `desktop-build.yml` tạo artifact matrix macOS arm64, macOS Intel và Windows x64 khi được gọi thủ công hoặc khi push tag `desktop-v*`; artifact lưu 14 ngày, chưa phát hành ra người dùng. Static validation pass: Node syntax, JSON config/package, YAML workflow, `tauri info` đọc được config, `git diff --check`. Chưa chạy matrix trên GitHub. **Phase 7A chưa hoàn tất:** local không có Apple signing identity (`security find-identity` trả 0) và repository chưa có Actions secrets (`gh secret list` rỗng); cần thiết lập certificate/notarization và updater signing secrets để tạo release có chữ ký. Chưa bật updater hoặc phát hành bundle unsigned.
+
 ### Phase 8 — Remote pairing
 
 **Công việc:** chọn LAN/VPN/relay sau spike; QR chứa lời mời ngắn hạn một lần, không chứa credential owner dài hạn; người dùng ghép nối thiết bị; session có expiry/revoke; transport mã hóa; giới hạn payload log/diff. Không chỉ đổi bind từ `127.0.0.1` sang `0.0.0.0`.

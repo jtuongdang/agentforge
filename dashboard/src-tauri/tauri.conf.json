@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build && npm run desktop:build:mac"
+    "beforeBuildCommand": "npm run build && npm run desktop:build"
   },
   "app": {
     "windows": [
@@ -27,7 +27,6 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
     "externalBin": ["binaries/devagent-backend"],
     "icon": [
       "icons/32x32.png",
