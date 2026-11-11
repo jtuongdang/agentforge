@@ -52,9 +52,9 @@ Giới hạn khảo sát: đọc code, chạy suite hiện có và thử nghiệ
 | Auto-review / auto-merge (§5, §18) | Chưa | `approve-draft-pr` chỉ push và tạo Draft PR; không merge | 4: policy; 7: integration riêng |
 | Rescue khi rate limit (§15) | Chưa | Retry hiện tại cùng agent; chưa phân loại lỗi, checkpoint và chuyển ownership | 5 |
 | Disk guard/watchdog/backoff (§16) | Một phần | Có storage, prune, timeout; chưa reserve disk, terminate process tree, retry theo loại lỗi | 0, 3, 5 |
-| Backup/restore portable (§16.6) | Một phần | `db_snapshot.py` backup SQLite nhất quán; không đóng gói repo, branch, worktree, RAG và path mapping | 1, 7 |
+| Backup/restore portable (§16.6) | Một phần | `.devagent` đóng gói SQLite + Git bundle + tùy chọn uncommitted; restore remap repo/worktree và reconcile task/run; RAG rebuild, profile activation đang chờ packaged CI | 1, 7 |
 | Hybrid code RAG (§19) | Một phần | `rag.py` chỉ index Markdown bằng FTS5/BM25; DB riêng `rag.sqlite3`; chưa AST/symbol graph | 6 |
-| Tauri + backend binary (§4–6) | Chưa | Chưa có shell, executable entrypoint, lifecycle hoặc pipeline | 2, 7 |
+| Tauri + backend binary (§4–6) | Một phần | Shell, lifecycle, per-target sidecar và build/smoke matrix đã có; ARM64 runner, DMG packaging ổn định, signing và updater còn thiếu | 2, 7 |
 | Google login/trial/license (§8–10, §18.2) | Chưa | Chỉ có thiết kế và code mẫu trong spec | 7 |
 | Remote QR (§3) | Chưa | Launcher bind loopback; chưa pairing, transport và quyền remote | 8 |
 
@@ -128,7 +128,7 @@ Giới hạn khảo sát: đọc code, chạy suite hiện có và thử nghiệ
 | Revoke license tự xóa dữ liệu tạm | Đề xuất chỉ hạn chế khởi chạy tính năng có license; cho phép đọc lịch sử/export, bảo toàn worktree và xử lý an toàn run đang chạy. Không để license service điều khiển xóa code người dùng. |
 | License hub “0đ trọn đời / 24×7”, core planner trên cloud | Chi phí/availability phải khảo sát riêng tại lúc chọn hạ tầng. Cloud planner cần opt-in và data boundary rõ ràng; không đưa vào MVP local. |
 | RAG loại trùng lặp 100%, giảm token 75%, index 1,5 giây | Chuyển thành giả thuyết cần benchmark trên tập repo có kích thước xác định; không cam kết trước khi đo. Hiện mới có Markdown retrieval. |
-| Snapshot DB phục hồi toàn bộ dự án | DB snapshot giữ metadata, không thay thế Git objects, uncommitted files, credentials hoặc đường dẫn repo. Cần manifest và quy trình remap/reconcile khi restore. |
+| Snapshot DB phục hồi toàn bộ dự án | SQLite snapshot đơn lẻ chưa đủ. Luồng `.devagent` hiện ghép metadata với Git bundles và opt-in working-tree overlays, scrub credentials/local paths rồi remap/reconcile khi restore; RAG index cần rebuild. |
 
 Code mẫu License Hub ở §10.3 cũng chưa sẵn sàng production: kiểm tra rồi thêm thiết bị không atomic; activation chưa kiểm tra `ExpiresAt`; verify đọc device status không tái đối chiếu license bị revoke/hết hạn; chưa có signed offline entitlement. Đây là backlog Phase 7, không phải implementation đã có.
 
