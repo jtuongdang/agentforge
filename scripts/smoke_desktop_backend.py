@@ -17,8 +17,6 @@ from urllib.request import Request, urlopen
 
 
 def terminate_tree(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None and os.name != "posix":
-        return
     if os.name == "posix":
         try:
             os.killpg(process.pid, signal.SIGTERM)
@@ -29,6 +27,7 @@ def terminate_tree(process: subprocess.Popen[str]) -> None:
         except subprocess.TimeoutExpired:
             pass
         try:
+            os.killpg(process.pid, 0)
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
