@@ -744,6 +744,53 @@ def test_cloud_provider_tasks_require_persisted_owner_consent_and_provider_agent
     assert scheduler._choose_agent(task) is provider_agent
 
 
+def test_provider_engine_enforces_consent_scopes_and_withholds_local_path(monkeypatch, tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+    from app import engine as engine_module
+    from app.engine import AgentExecutionEngine
+
+    current_task = {"provider_data_consent": False}
+    monkeypatch.setattr(engine_module, "get_task", lambda _task_id: current_task)
+    engine = object.__new__(AgentExecutionEngine)
+    agent = {"id": "provider-agent", "adapter": "provider", "provider": "openai",
+             "command": ["connection-id"], "file_globs": ["src/**/*.py"]}
+    called = []
+
+    async def fake_execute(*args, **kwargs):
+        called.append((args, kwargs))
+        kwargs["on_tool"]("write_file", "src/main.py", True)
+        return 0
+
+    monkeypatch.setattr(engine_module.provider_worker, "execute", fake_execute)
+    logged = []
+    monkeypatch.setattr(engine_module, "log_event", lambda *args, **kwargs: logged.append((args, kwargs)))
+
+    with pytest.raises(RuntimeError, match="explicit task data-transfer consent"):
+        asyncio.run(engine._invoke(agent, str(tmp_path), tmp_path / "task.md", "fixture", "task-id",
+                                   ["src/**/*.py"]))
+    assert called == []
+
+    current_task["provider_data_consent"] = True
+    result = asyncio.run(engine._invoke(agent, str(tmp_path), tmp_path / "task.md", "fixture", "task-id",
+                                        ["src/**/*.py"]))
+    assert result == 0
+    args, kwargs = called[0]
+    assert args[0] == "connection-id"
+    assert args[2] == str(tmp_path)
+    assert args[3:] == (["src/**/*.py"], ["src/**/*.py"])
+    assert "fixture" == args[1]
+    assert "fixture-private-content" not in repr(logged)
+    assert logged[0][0][2] == "Provider worker wrote write_file src/main.py."
+
+    task = {"contract_id": None, "base_branch": "main", "base_sha": "abc123"}
+    plan = SimpleNamespace(title="Fixture", objective="Implement fixture", file_globs=["src/**/*.py"])
+    prompt = AgentExecutionEngine._task_markdown(task, plan, "task-branch", str(tmp_path),
+                                                 include_worktree_path=False)
+    assert str(tmp_path) not in prompt
+    assert "(local path withheld)" in prompt
+
+
 def test_provider_schema_upgrade_snapshots_version_five_database(tmp_path, monkeypatch):
     import sqlite3
 

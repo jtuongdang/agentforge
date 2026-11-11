@@ -120,7 +120,8 @@ class AgentExecutionEngine:
                       {"files": guidance_files, "source_context": context_details}, agent_id=agent["id"])
             task_file = db.DATA_ROOT / "handoffs" / f"{task_id}.md"
             task_file.parent.mkdir(parents=True, exist_ok=True)
-            task_content = self._task_markdown(task, plan, branch, worktree)
+            task_content = self._task_markdown(task, plan, branch, worktree,
+                                               include_worktree_path=agent.get("adapter") != "provider")
             task_file.write_text(task_content, encoding="utf-8")
             set_task(task_id, "assigned", branch=branch, worktree=worktree)
             log_event(task_id, "worktree_created", f"Branch {branch} created in an isolated worktree.", agent_id=agent["id"])
@@ -500,16 +501,18 @@ class AgentExecutionEngine:
             return redact(line)
 
     @staticmethod
-    def _task_markdown(task: dict, plan, branch: str, worktree: str) -> str:
+    def _task_markdown(task: dict, plan, branch: str, worktree: str,
+                       include_worktree_path: bool = True) -> str:
         contract = ""
         if task["contract_id"]:
             with db.connect() as con:
                 row = con.execute("SELECT title,body,version FROM contracts WHERE id=?", (task["contract_id"],)).fetchone()
             if row:
                 contract = f"\n## Approved contract v{row['version']}: {row['title']}\n{row['body']}\n"
+        worktree_value = worktree if include_worktree_path else "(local path withheld)"
         return (f"# {plan.title}\n\n{plan.objective}\n"
                 f"\n## Isolation\nBase branch: `{task.get('base_branch') or 'repository default'}`\n"
-                f"Task branch: `{branch}`\nWorktree: `{worktree}`\n"
+                f"Task branch: `{branch}`\nWorktree: `{worktree_value}`\n"
                 f"Pinned base commit: `{task.get('base_sha') or 'not recorded'}`\n"
                 f"\n## Allowed files\n" + "\n".join(f"- `{p}`" for p in plan.file_globs) +
                 f"\n## Contract\n{contract or 'No shared contract declared.'}\n"
