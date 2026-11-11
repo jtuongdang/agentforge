@@ -2039,11 +2039,14 @@ def test_checkpoint_restore_remaps_repositories_and_reconciles_worktrees(tmp_pat
         repo_row = con.execute("SELECT path,enabled FROM repositories WHERE id='repo-a'").fetchone()
         task_row = con.execute("SELECT status,worktree,error FROM tasks WHERE id='task-a'").fetchone()
         agent_row = con.execute("SELECT command,enabled FROM agents WHERE id='agent-task'").fetchone()
+        provider_row = con.execute("SELECT secret_ref,state,models,checked_at FROM provider_connections "
+                                   "WHERE id='provider-a'").fetchone()
     assert repo_row == (str(repo_path.resolve()), 1)
     assert task_row[0] == "blocked"
     assert task_row[1] == str(worktree_path.resolve())
     assert "reconcile before retry" in task_row[2]
     assert agent_row == ("[]", 0)
+    assert provider_row == (None, "unavailable", "[]", None)
 
 
 def test_checkpoint_restore_refuses_existing_destination(tmp_path, monkeypatch):
