@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import db
 from .git_ops import repository
+from .fleet import credential_key, set_credential_cooldown, transfer_task_to_rescue
 from .recovery import RecoveryManager
 from .validation import ValidationEngine
 from .worktrees import GitWorktreeManager
@@ -104,6 +105,8 @@ class AgentExecutionEngine:
             validation = {}
             last_error = None
             lease_id: str | None = None
+            tried_agent_ids = {agent["id"]}
+            preclaimed_run_id: str | None = None
 
             def release_writer() -> None:
                 nonlocal lease_id
@@ -123,21 +126,25 @@ class AgentExecutionEngine:
 
             for attempt in range(task["max_retries"] + 1):
                 set_task(task_id, "running", retries=attempt)
-                run_id = str(uuid.uuid4())
-                with db.transaction() as con:
-                    con.execute("INSERT INTO runs(id,task_id,agent_id,state) VALUES(?,?,?,'running')",
-                                (run_id, task_id, agent["id"]))
-                candidate_lease = str(uuid.uuid4())
-                if not WriterLeaseManager.acquire(task_id, run_id, agent["id"], candidate_lease):
-                    message = "Task worktree already has an active or orphaned writer lease; no worker was started."
+                if preclaimed_run_id:
+                    run_id = preclaimed_run_id
+                    preclaimed_run_id = None
+                else:
+                    run_id = str(uuid.uuid4())
                     with db.transaction() as con:
-                        con.execute("UPDATE runs SET state='blocked',exit_code=125,finished_at=CURRENT_TIMESTAMP,report=? WHERE id=?",
-                                    (db.dumps({"error": message, "failure_class": "writer_lease_conflict"}), run_id))
-                    validation = {"passed": False, "blocked": True, "reason": "writer_lease_conflict"}
-                    last_error = message
-                    log_event(task_id, "writer_lease_conflict", message, agent_id=agent["id"])
-                    break
-                lease_id = candidate_lease
+                        con.execute("INSERT INTO runs(id,task_id,agent_id,state) VALUES(?,?,?,'running')",
+                                    (run_id, task_id, agent["id"]))
+                    candidate_lease = str(uuid.uuid4())
+                    if not WriterLeaseManager.acquire(task_id, run_id, agent["id"], candidate_lease):
+                        message = "Task worktree already has an active or orphaned writer lease; no worker was started."
+                        with db.transaction() as con:
+                            con.execute("UPDATE runs SET state='blocked',exit_code=125,finished_at=CURRENT_TIMESTAMP,report=? WHERE id=?",
+                                        (db.dumps({"error": message, "failure_class": "writer_lease_conflict"}), run_id))
+                        validation = {"passed": False, "blocked": True, "reason": "writer_lease_conflict"}
+                        last_error = message
+                        log_event(task_id, "writer_lease_conflict", message, agent_id=agent["id"])
+                        break
+                    lease_id = candidate_lease
                 prompt = task_content
                 if last_error:
                     prompt += f"\n\nRepair attempt {attempt}: previous validation failed:\n{last_error}\nFix this and re-run the relevant checks."
@@ -216,10 +223,43 @@ class AgentExecutionEngine:
                         release_writer()
                         break
                 failure = finish_failed_run(run_id, code, last_error or "", validation, output_tail, checkpoint)
-                release_writer()
-                if (failure.retryable and
-                        self.recovery.should_retry(attempt, task["max_retries"], bool(validation.get("blocked")))):
-                    delay = self.recovery.backoff_seconds(attempt, failure.retry_after_seconds)
+                retry_budget = self.recovery.should_retry(attempt, task["max_retries"], bool(validation.get("blocked")))
+                can_recover = failure.retryable or failure.category == "auth"
+                rescue_category = failure.category in {"auth", "rate_limit", "network", "timeout"}
+                if retry_budget and can_recover and lease_id:
+                    if failure.category == "rate_limit":
+                        set_credential_cooldown(agent,
+                                                failure.retry_after_seconds if failure.retry_after_seconds is not None else 30.0,
+                                                failure.category)
+                    required = set(task["required_capabilities"])
+                    current_credential = credential_key(agent)
+                    rescue_candidates = [candidate for candidate in self.registry.list() if rescue_category
+                        if candidate["id"] not in tried_agent_ids and candidate["enabled"] and candidate["available"]
+                        and candidate["adapter"] != "handoff" and set(candidate["capabilities"]).issuperset(required)
+                        and credential_key(candidate) != current_credential
+                        and not self.validation.inspect_scope(paths, task["file_globs"], candidate["file_globs"])]
+                    rescue_candidates.sort(key=lambda item: (item["adapter"] == agent["adapter"], item["name"].lower()))
+                    for candidate in rescue_candidates:
+                        next_run_id = str(uuid.uuid4())
+                        if transfer_task_to_rescue(task_id, agent["id"], candidate, lease_id, run_id, next_run_id):
+                            previous_agent = agent
+                            agent = candidate
+                            tried_agent_ids.add(candidate["id"])
+                            preclaimed_run_id = next_run_id
+                            set_task(task_id, "recovering", retries=attempt + 1, error=last_error)
+                            log_event(task_id, "worker_rescue_transfer",
+                                      f"Stopped {previous_agent['name']} and transferred the task writer lease to {agent['name']}.",
+                                      {"failure_class": failure.category, "from_agent_id": previous_agent["id"],
+                                       "to_agent_id": agent["id"], "from_run_id": run_id,
+                                       "to_run_id": next_run_id, "checkpoint": checkpoint}, agent_id=agent["id"])
+                            break
+                if not preclaimed_run_id:
+                    release_writer()
+                if retry_budget and can_recover and not preclaimed_run_id:
+                    retry_after = failure.retry_after_seconds
+                    if failure.category == "rate_limit" and retry_after is None:
+                        retry_after = 30.0
+                    delay = self.recovery.backoff_seconds(attempt, retry_after)
                     set_task(task_id, "recovering", retries=attempt + 1, error=last_error)
                     log_event(task_id, "recovering",
                               f"Bounded {failure.category} recovery retry {attempt + 1}/{task['max_retries']} "
@@ -228,7 +268,8 @@ class AgentExecutionEngine:
                                "backoff_seconds": delay}, agent_id=agent["id"])
                     await asyncio.sleep(delay)
                 else:
-                    break
+                    if not preclaimed_run_id:
+                        break
             final_status = "blocked" if validation.get("blocked") else "failed"
             set_task(task_id, final_status, error=last_error, validation=validation,
                      finished_at=datetime.now(timezone.utc).isoformat())
@@ -327,19 +368,46 @@ class AgentExecutionEngine:
                         if on_output:
                             on_output(decoded)
                         log_event(task_id, "agent_log", self._event_summary(decoded), agent_id=agent["id"])
+            reader_task = asyncio.create_task(stream_output())
             try:
-                await asyncio.wait_for(asyncio.gather(stream_output(), proc.wait()), timeout=3600)
+                await asyncio.wait_for(proc.wait(), timeout=3600)
             except asyncio.TimeoutError:
                 await terminate_process_tree(proc)
+                reader_task.cancel()
+                await asyncio.gather(reader_task, return_exceptions=True)
                 log_event(task_id, "agent_timeout", "Agent process exceeded 60 minute limit.", agent_id=agent["id"])
                 return 124
-            return proc.returncode or 0
-        except asyncio.CancelledError:
-            if "proc" in locals():
+            except asyncio.CancelledError:
                 await terminate_process_tree(proc)
+                reader_task.cancel()
+                await asyncio.gather(reader_task, return_exceptions=True)
+                raise
+            code = proc.returncode or 0
+            # A CLI may exit while a descendant keeps running in its process group.
+            # Join/terminate that group before releasing this worktree's writer lease.
+            await terminate_process_tree(proc, grace_seconds=0.25)
+            try:
+                await asyncio.wait_for(reader_task, timeout=5)
+            except asyncio.TimeoutError:
+                reader_task.cancel()
+                await asyncio.gather(reader_task, return_exceptions=True)
+            return code
+        except asyncio.CancelledError:
+            if "proc" in locals() and proc.returncode is None:
+                await terminate_process_tree(proc)
+            if "reader_task" in locals() and not reader_task.done():
+                reader_task.cancel()
+                await asyncio.gather(reader_task, return_exceptions=True)
             raise
         except FileNotFoundError:
             raise RuntimeError(f"Configured agent executable not found: {args[0]}")
+        except Exception:
+            if "proc" in locals():
+                await terminate_process_tree(proc)
+            if "reader_task" in locals() and not reader_task.done():
+                reader_task.cancel()
+                await asyncio.gather(reader_task, return_exceptions=True)
+            raise
 
     @staticmethod
     def _antigravity_write_permissions(worktree: str, file_globs: list[str]) -> list[str]:

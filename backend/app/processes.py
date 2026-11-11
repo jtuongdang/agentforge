@@ -15,8 +15,15 @@ def process_group_options() -> dict:
 
 async def terminate_process_tree(process: asyncio.subprocess.Process, grace_seconds: float = 3.0) -> None:
     """Ask a subprocess tree to stop, then force-stop its process group if needed."""
+    if not getattr(process, "pid", None):
+        return
     if process.returncode is not None and os.name != "posix":
         return
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, 0)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
     try:
         if os.name == "posix":
             os.killpg(process.pid, signal.SIGTERM)

@@ -23,7 +23,7 @@ from . import db
 from . import tech_lead
 from .engine import get_task, log_event, set_task
 from . import fleet as fleet_manager
-from .git_ops import (check_repository_sync, is_github_remote, list_repository_branches,
+from .git_ops import (changed_paths, check_repository_sync, is_github_remote, list_repository_branches,
                       git_author, register_repository, repository, run, validate_repository_base,
                       validated_revision_is_current)
 from .models import (AgentCreate, CompleteHandoff, ContractCreate, FleetSettingsUpdate, LeadHandshake,
@@ -94,21 +94,45 @@ def bootstrap() -> None:
 
 def reconcile_interrupted_tasks() -> None:
     interrupted = ("planning", "assigned", "running", "validating", "recovering", "publishing")
-    with db.transaction() as con:
+    with db.connect() as con:
         marks = ",".join("?" for _ in interrupted)
-        rows = con.execute(f"SELECT id,status,assigned_agent_id,worktree FROM tasks WHERE status IN ({marks})", interrupted).fetchall()
-        for task in rows:
+        rows = con.execute(f"""SELECT t.id,t.status,t.assigned_agent_id,t.worktree,t.base_sha,t.base_branch,
+            t.file_globs,a.file_globs AS agent_file_globs FROM tasks t LEFT JOIN agents a ON a.id=t.assigned_agent_id
+            WHERE t.status IN ({marks})""", interrupted).fetchall()
+    for task in rows:
+        checkpoint = {"retained_worktree": task["worktree"], "scanned": False,
+                      "requires_manual_inspection": True}
+        scan_problem = None
+        if task["worktree"] and Path(task["worktree"]).is_dir():
+            try:
+                paths = changed_paths(task["worktree"], task["base_sha"] or task["base_branch"])
+                task_globs = json.loads(task["file_globs"] or "[]")
+                agent_globs = json.loads(task["agent_file_globs"] or '["**/*"]')
+                outside = validation_engine.inspect_scope(paths, task_globs, agent_globs)
+                secret_files = validation_engine.inspect_secrets(task["worktree"], paths)
+                checkpoint = {"retained_worktree": task["worktree"], "base_ref": task["base_sha"] or task["base_branch"],
+                              "changed_paths": paths, "scanned": True,
+                              "outside_scope": outside, "possible_secret_files": secret_files,
+                              "requires_manual_inspection": bool(outside or secret_files)}
+            except Exception as exc:
+                scan_problem = type(exc).__name__
+                checkpoint["scan_error"] = scan_problem
+        with db.transaction() as con:
             publishing = task["status"] == "publishing"
-            status = "blocked" if publishing else "failed"
-            message = ("Orchestrator stopped during publication. Check the remote branch and GitHub before retrying; "
-                       "no automatic push or PR retry was performed." if publishing else
-                       "Orchestrator restarted while this task was active. It was not resumed; inspect task details and any retained worktree.")
+            blocked_scan = bool(checkpoint.get("outside_scope") or checkpoint.get("possible_secret_files") or scan_problem)
+            status = "blocked" if publishing or blocked_scan else "failed"
+            if publishing:
+                message = ("Orchestrator stopped during publication. Check the remote branch and GitHub before retrying; "
+                           "no automatic push or PR retry was performed.")
+            elif blocked_scan:
+                message = "Restart checkpoint scan found unsafe or unreadable worktree state. Inspect the retained worktree before any retry."
+            else:
+                message = "Orchestrator restarted while this task was active. It was not resumed; inspect task details and the retained checkpoint."
             con.execute("UPDATE tasks SET status=?,error=?,finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                         (status, message, task["id"]))
             con.execute("UPDATE runs SET state='interrupted',exit_code=125,finished_at=CURRENT_TIMESTAMP,report=? "
                         "WHERE task_id=? AND state='running'", (db.dumps({"error": message,
-                            "failure_class": "restart_interrupted", "checkpoint": {
-                                "retained_worktree": task["worktree"], "requires_manual_inspection": True}}), task["id"]))
+                            "failure_class": "restart_interrupted", "checkpoint": checkpoint}), task["id"]))
             con.execute("UPDATE task_writer_leases SET state='orphaned',updated_at=CURRENT_TIMESTAMP "
                         "WHERE task_id=? AND state='active'", (task["id"],))
             con.execute("INSERT INTO events(task_id,agent_id,kind,message,details) VALUES(?,?,?,?,?)",
@@ -349,14 +373,17 @@ def fleet_status():
     with db.connect() as con:
         active = [dict(row) for row in con.execute(f"""SELECT t.id AS task_id,t.title,t.status,
                 t.assigned_agent_id,a.name AS agent_name,r.name AS repository_name,
-                (SELECT runs.id FROM runs WHERE runs.task_id=t.id ORDER BY runs.started_at DESC LIMIT 1) AS run_id
+                (SELECT runs.id FROM runs WHERE runs.task_id=t.id ORDER BY runs.started_at DESC,runs.rowid DESC LIMIT 1) AS run_id
             FROM tasks t LEFT JOIN agents a ON a.id=t.assigned_agent_id
             LEFT JOIN repositories r ON r.id=t.repository_id WHERE t.status IN ({marks})
             ORDER BY t.created_at,t.id""", active_states).fetchall()]
         queued = con.execute("SELECT COUNT(*) FROM tasks WHERE status IN ('queued','waiting_for_scope','waiting_for_contract')").fetchone()[0]
+        cooldowns = [dict(row) for row in con.execute("""SELECT adapter,executable,reason,expires_at
+            FROM credential_cooldowns WHERE julianday(expires_at)>julianday('now') ORDER BY expires_at""").fetchall()]
     free_disk = fleet_manager.disk_free_bytes()
     reserved = config["min_free_disk_bytes"] + len(active) * config["disk_reserve_per_run_bytes"]
     return {"settings": config, "active_runs": active, "active_run_count": len(active), "queued_tasks": queued,
+            "credential_cooldowns": cooldowns,
             "draining": len(active) > config["max_active_runs"],
             "builds_active": orchestrator.build_slots.active,
             "disk": {"free_bytes": free_disk, "required_reserve_bytes": reserved,
@@ -639,7 +666,7 @@ def create_task(body: TaskCreate):
 def get_task_details(task_id: str):
     task = task_row(task_id)
     with db.connect() as con:
-        task["runs"] = [dict(r) for r in con.execute("SELECT * FROM runs WHERE task_id=? ORDER BY started_at", (task_id,)).fetchall()]
+        task["runs"] = [dict(r) for r in con.execute("SELECT * FROM runs WHERE task_id=? ORDER BY started_at,rowid", (task_id,)).fetchall()]
         lease = con.execute("SELECT task_id,run_id,agent_id,state,acquired_at,updated_at "
                             "FROM task_writer_leases WHERE task_id=?", (task_id,)).fetchone()
     task["writer_lease"] = dict(lease) if lease else None

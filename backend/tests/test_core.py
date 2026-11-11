@@ -399,7 +399,7 @@ def test_db_schema_migration_is_versioned_and_backed_up(tmp_path, monkeypatch):
     db.init_db()
 
     with db.connect() as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 5
         assert "base_sha" in {row[1] for row in con.execute("PRAGMA table_info(tasks)")}
     backups = list((tmp_path / "backups").glob("pre-migration-v0-*.sqlite3"))
     assert len(backups) == 1
@@ -416,6 +416,7 @@ def test_writer_lease_migration_backs_up_version_three_database(tmp_path, monkey
     db.init_db()
     with db.transaction() as con:
         con.execute("DROP TABLE task_writer_leases")
+        con.execute("DROP TABLE credential_cooldowns")
         con.execute("PRAGMA user_version=3")
 
     db.init_db()
@@ -426,9 +427,13 @@ def test_writer_lease_migration_backs_up_version_three_database(tmp_path, monkey
         assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
                            "AND name='task_writer_leases'").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                           "AND name='credential_cooldowns'").fetchone()[0] == 0
     with db.connect() as con:
         assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
                             "AND name='task_writer_leases'").fetchone()[0] == 1
+        assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                            "AND name='credential_cooldowns'").fetchone()[0] == 1
 
 
 def test_packaged_data_directory_is_outside_application_bundle(tmp_path, monkeypatch):
@@ -479,6 +484,49 @@ def test_restart_reconciliation_marks_running_and_publishing_tasks_for_manual_re
         assert con.execute("SELECT COUNT(*) FROM events WHERE kind='restart_recovery'").fetchone()[0] == 2
 
 
+def test_restart_recovery_scans_tracked_and_untracked_checkpoint_before_marking_blocked(tmp_path, monkeypatch):
+    import json
+    from app.main import reconcile_interrupted_tasks
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "restart-scan.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    worktree = tmp_path / "retained-worktree"
+    (worktree / "src").mkdir(parents=True)
+    subprocess.run(["git", "init", "-b", "main", str(worktree)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(worktree), "config", "user.name", "Fixture"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "config", "user.email", "fixture@example.invalid"], check=True)
+    tracked = worktree / "src" / "main.py"
+    tracked.write_text("original = True\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(worktree), "add", "src/main.py"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "commit", "-m", "base"], check=True,
+                   capture_output=True)
+    tracked.write_text("changed = True\n", encoding="utf-8")
+    untracked = worktree / "src" / "settings.py"
+    untracked.write_text("token=ghp_abcdefghijklmnopqrstuvwxyz123456\n", encoding="utf-8")
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path,default_branch) VALUES('r','fixture',?,'main')",
+                    (str(tmp_path),))
+        con.execute("INSERT INTO agents(id,name,adapter,command,capabilities,file_globs) "
+                    "VALUES('a','Agent','exec','[]','[]','[\"**/*\"]')")
+        con.execute("""INSERT INTO tasks(id,title,objective,repository_id,base_branch,base_sha,status,
+            assigned_agent_id,file_globs,worktree) VALUES('t','task','objective','r','main',NULL,'running',
+            'a','["src/*.py"]',?)""", (str(worktree),))
+        con.execute("INSERT INTO runs(id,task_id,agent_id,state) VALUES('run','t','a','running')")
+        con.execute("INSERT INTO task_writer_leases(task_id,lease_id,run_id,agent_id,state) "
+                    "VALUES('t','lease','run','a','active')")
+
+    reconcile_interrupted_tasks()
+
+    with db.connect() as con:
+        task = con.execute("SELECT status FROM tasks WHERE id='t'").fetchone()
+        report = json.loads(con.execute("SELECT report FROM runs WHERE id='run'").fetchone()[0])
+    assert task["status"] == "blocked"
+    assert report["checkpoint"]["scanned"] is True
+    assert report["checkpoint"]["changed_paths"] == ["src/main.py", "src/settings.py"]
+    assert report["checkpoint"]["possible_secret_files"] == ["src/settings.py"]
+
+
 def test_writer_lease_excludes_parallel_writer_and_requires_current_owner_for_transfer(tmp_path, monkeypatch):
     from app.writer_leases import WriterLeaseManager
 
@@ -504,6 +552,155 @@ def test_writer_lease_excludes_parallel_writer_and_requires_current_owner_for_tr
     assert WriterLeaseManager.get("t")["agent_id"] == "b"
     assert WriterLeaseManager.release("t", "lease-a") is True
     assert WriterLeaseManager.release("t", "lease-a") is False
+
+
+def test_rescue_worker_transfer_respects_credential_budget_and_moves_run_provenance(tmp_path, monkeypatch):
+    from app.fleet import transfer_task_to_rescue, update_settings
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "rescue-budget.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('r','fixture',?)", (str(tmp_path),))
+        con.execute("INSERT INTO agents(id,name,adapter,command,capabilities,file_globs,max_parallel,enabled,available) VALUES"
+                    "('a','Agent A','exec','[\"/bin/a\"]','[]','[\"**/*\"]',1,1,1),"
+                    "('b','Agent B','exec','[\"/bin/b\"]','[]','[\"**/*\"]',1,1,1),"
+                    "('c','Agent C','exec','[\"/bin/b\"]','[]','[\"**/*\"]',1,1,1)")
+        con.execute("INSERT INTO tasks(id,title,objective,repository_id,status,assigned_agent_id,file_globs) VALUES"
+                    "('t','task','objective','r','recovering','a','[\"**/*\"]'),"
+                    "('other','other','objective','r','running','c','[\"**/*\"]')")
+        con.execute("INSERT INTO runs(id,task_id,agent_id,state) VALUES"
+                    "('run-a','t','a','failed'),('other-run','other','b','running')")
+        con.execute("INSERT INTO task_writer_leases(task_id,lease_id,run_id,agent_id,state) "
+                    "VALUES('t','lease-a','run-a','a','active')")
+    update_settings({"max_per_credential": 1})
+
+    assert not transfer_task_to_rescue("t", "a", {"id": "b", "adapter": "exec", "command": ["/bin/b"]},
+                                       "lease-a", "run-a", "run-b")
+    with db.transaction() as con:
+        con.execute("UPDATE tasks SET status='completed' WHERE id='other'")
+        con.execute("INSERT INTO tasks(id,title,objective,repository_id,status,assigned_agent_id,file_globs) "
+                    "VALUES('active-b','active','objective','r','running','b','[\"**/*\"]')")
+    update_settings({"max_per_credential": 2})
+    assert not transfer_task_to_rescue("t", "a", {"id": "b", "adapter": "exec", "command": ["/bin/b"]},
+                                       "lease-a", "run-a", "run-b")
+    with db.transaction() as con:
+        con.execute("UPDATE tasks SET status='completed' WHERE id='active-b'")
+    assert transfer_task_to_rescue("t", "a", {"id": "b", "adapter": "exec", "command": ["/bin/b"]},
+                                   "lease-a", "run-a", "run-b")
+    with db.connect() as con:
+        assert con.execute("SELECT assigned_agent_id FROM tasks WHERE id='t'").fetchone()[0] == "b"
+        assert con.execute("SELECT agent_id FROM runs WHERE id='run-b'").fetchone()[0] == "b"
+        assert con.execute("SELECT run_id FROM task_writer_leases WHERE task_id='t'").fetchone()[0] == "run-b"
+
+
+def test_rate_limit_cooldown_is_persisted_per_cli_credential(tmp_path, monkeypatch):
+    from app.fleet import cooldown_remaining, set_credential_cooldown
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "credential-cooldown.sqlite3")
+    db.init_db()
+    agent = {"adapter": "exec", "command": ["/bin/worker"]}
+
+    assert cooldown_remaining(agent) == 0
+    set_credential_cooldown(agent, 15, "rate_limit")
+
+    assert 0 < cooldown_remaining(agent) <= 15
+
+
+def test_scheduler_does_not_admit_agent_during_credential_cooldown(tmp_path, monkeypatch):
+    from app import fleet
+    from app.scheduler import TaskScheduler
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "cooldown-admission.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    monkeypatch.setattr("app.scheduler.disk_free_bytes", lambda: 10**12)
+    db.init_db()
+    agent = {"id": "agent", "adapter": "exec", "command": ["/bin/worker"]}
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('r','fixture',?)", (str(tmp_path),))
+        con.execute("INSERT INTO tasks(id,title,objective,repository_id,file_globs) "
+                    "VALUES('t','task','objective','r','[\"**/*\"]')")
+    fleet.set_credential_cooldown(agent, 15, "rate_limit")
+
+    assert TaskScheduler._claim_task("t", agent) is False
+    with db.connect() as con:
+        assert con.execute("SELECT status FROM tasks WHERE id='t'").fetchone()[0] == "queued"
+
+
+def test_engine_moves_rate_limited_task_to_budgeted_rescue_worker(tmp_path, monkeypatch):
+    import asyncio
+    from app.engine import AgentExecutionEngine
+    from app.fleet import cooldown_remaining
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "engine-rescue.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "app-data")
+    db.init_db()
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    worktree = tmp_path / "task-worktree"
+    worktree.mkdir()
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path,default_branch) VALUES('r','fixture',?,'main')",
+                    (str(repo_path),))
+        con.execute("INSERT INTO agents(id,name,adapter,command,capabilities,file_globs,max_parallel,enabled,available) VALUES"
+                    "('a','Primary','exec','[\"/bin/primary\"]','[\"implementation\"]','[\"**/*\"]',1,1,1),"
+                    "('b','Rescue','exec','[\"/bin/rescue\"]','[\"implementation\"]','[\"**/*\"]',1,1,1)")
+        con.execute("""INSERT INTO tasks(id,title,objective,repository_id,base_branch,status,
+            required_capabilities,file_globs,max_retries) VALUES('t','implement','do work','r','main','queued',
+            '["implementation"]','["**/*"]',1)""")
+
+    class FakeWorktrees:
+        def prepare(self, *_args):
+            return "orchestrator/t", str(worktree)
+        def changed_paths(self, *_args):
+            return ["src/app.py"]
+        def commit(self, *_args):
+            return "abc123"
+
+    class FakeValidation:
+        @staticmethod
+        def inspect_scope(*_args):
+            return []
+        @staticmethod
+        def inspect_secrets(*_args):
+            return []
+        async def validate(self, *_args, **_kwargs):
+            return {"passed": True}
+
+    primary = {"id": "a", "name": "Primary", "adapter": "exec", "command": ["/bin/primary"],
+               "capabilities": ["implementation"], "file_globs": ["**/*"], "enabled": True, "available": True}
+    rescue = {"id": "b", "name": "Rescue", "adapter": "exec", "command": ["/bin/rescue"],
+              "capabilities": ["implementation"], "file_globs": ["**/*"], "enabled": True, "available": True}
+    class FakeRegistry:
+        @staticmethod
+        def list():
+            return [primary, rescue]
+
+    engine = AgentExecutionEngine(FakeRegistry(), FakeWorktrees(), FakeValidation())
+    calls = []
+    async def invoke(agent, _worktree, _task_file, _prompt, _task_id, _globs, on_output=None):
+        calls.append(agent["id"])
+        if agent["id"] == "a":
+            on_output("HTTP 429 Too Many Requests")
+            return 1
+        return 0
+    engine._invoke = invoke
+
+    asyncio.run(engine.execute("t", primary))
+
+    assert calls == ["a", "b"]
+    with db.connect() as con:
+        task = con.execute("SELECT status,assigned_agent_id,worktree FROM tasks WHERE id='t'").fetchone()
+        runs = con.execute("SELECT agent_id,state FROM runs WHERE task_id='t' ORDER BY started_at,rowid").fetchall()
+        lease_count = con.execute("SELECT COUNT(*) FROM task_writer_leases WHERE task_id='t'").fetchone()[0]
+        transfer = con.execute("SELECT details FROM events WHERE task_id='t' AND kind='worker_rescue_transfer'").fetchone()
+    assert task["status"] == "awaiting_pr_approval"
+    assert task["assigned_agent_id"] == "b"
+    assert task["worktree"] == str(worktree)
+    assert [(row["agent_id"], row["state"]) for row in runs] == [("a", "failed"), ("b", "passed")]
+    assert lease_count == 0
+    assert transfer is not None
+    assert cooldown_remaining(primary) > 0
 
 
 def test_validation_engine_blocks_unsupported_project_instead_of_running_maven(tmp_path):
@@ -1293,6 +1490,32 @@ def test_terminate_process_tree_stops_child_process(tmp_path):
         assert not marker.exists(), "child outlived its process group"
 
     asyncio.run(scenario())
+
+
+def test_agent_invoke_stops_descendants_after_worker_exits(tmp_path, monkeypatch):
+    import asyncio
+    import os
+    import sys
+    from app.engine import AgentExecutionEngine
+
+    if os.name != "posix":
+        pytest.skip("Process group termination assertion currently targets POSIX")
+    marker = tmp_path / "orphan-wrote-after-worker-exit"
+    child_code = ("import pathlib,time; time.sleep(0.7); pathlib.Path(%r).write_text('survived')") % str(marker)
+    parent_code = ("import subprocess,sys; subprocess.Popen([sys.executable,'-c',%r], "
+                   "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); print('done')") % child_code
+
+    async def scenario():
+        engine = object.__new__(AgentExecutionEngine)
+        monkeypatch.setattr("app.engine.log_event", lambda *_args, **_kwargs: None)
+        result = await engine._invoke({"adapter": "exec", "command": [sys.executable, "-c", parent_code],
+                                       "id": "fixture-agent"}, str(tmp_path), tmp_path / "TASK.md",
+                                      "fixture", "task-fixture")
+        await asyncio.sleep(0.9)
+        return result
+
+    assert asyncio.run(scenario()) == 0
+    assert not marker.exists()
 
 
 def test_dashboard_static_mount_serves_spa(monkeypatch):

@@ -41,7 +41,7 @@ type EventRow = { id: number; kind: string; message: string; created_at: string;
 type Nav = 'Overview' | 'Tasks' | 'Agents' | 'Contracts' | 'History' | 'Storage' | 'Fleet'
 type StorageMetrics = { measured_at: string; data_bytes: number; categories: Record<string, number>; database_files: Record<string, number>; sqlite_logical_bytes: number; sqlite_unused_bytes: number; disk: { total_bytes: number; free_bytes: number; used_percent: number }; counts: { repositories: number; agents: number; tasks: number; runs: number; events: number; active_tasks: number } }
 type FleetSettings = { max_active_runs: number; max_parallel_builds: number; max_per_credential: number; min_free_disk_bytes: number; disk_reserve_per_run_bytes: number }
-type FleetSnapshot = { settings: FleetSettings; active_runs: { task_id: string; title: string; status: string; assigned_agent_id?: string; agent_name?: string; repository_name?: string; run_id?: string }[]; active_run_count: number; queued_tasks: number; draining: boolean; builds_active: number; disk: { free_bytes: number; required_reserve_bytes: number; can_admit_run: boolean } }
+type FleetSnapshot = { settings: FleetSettings; active_runs: { task_id: string; title: string; status: string; assigned_agent_id?: string; agent_name?: string; repository_name?: string; run_id?: string }[]; credential_cooldowns: { adapter: string; executable: string; reason: string; expires_at: string }[]; active_run_count: number; queued_tasks: number; draining: boolean; builds_active: number; disk: { free_bytes: number; required_reserve_bytes: number; can_admit_run: boolean } }
 type LeadStatus = { connected: boolean; session: { session_id: string; client_id: string; client_name: string; scopes: string[]; lease_expires_at: string; session_expires_at: string } | null }
 type LeadPairing = { pairing_code: string; expires_at: string; contract_version: number; scopes: string[] }
 type LeadContract = { version: number; lease_ttl_seconds: number; session_ttl_seconds: number; client_endpoints: Record<string,string>; publication: string }
@@ -479,6 +479,7 @@ function FleetPage({fleet,busy,onSave,leadStatus,pairing,prompt,leadBusy,onCreat
       <StatCard label="Free disk" value={Number((fleet.disk.free_bytes / 1024**3).toFixed(1))} note={`Reserve target ${formatBytes(fleet.disk.required_reserve_bytes)} · ${fleet.disk.can_admit_run ? 'admission available' : 'admission paused'}`} icon="▤" tone={fleet.disk.can_admit_run ? 'blue' : 'amber'}/>
     </section>
     {fleet.draining && <div className="storage-alert warning"><b>Capacity is draining</b><span>Current runs continue; new runs wait until the active count falls below the new limit.</span></div>}
+    {fleet.credential_cooldowns.length>0 && <div className="storage-alert warning"><b>CLI credential cooldown</b><span>{fleet.credential_cooldowns.map(item=>`${item.adapter} · ${item.executable} (${item.reason}, until ${date(item.expires_at)})`).join(' · ')}</span></div>}
     <section className="two-col storage-details">
       <div className="panel"><div className="panel-heading"><div><h2>Resource limits</h2><p>Changes persist locally and apply to new admissions. Active runs are never killed to reduce capacity.</p></div></div>
         <form className="form" onSubmit={submit}>

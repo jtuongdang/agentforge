@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 
 from . import db
 from .engine import AgentExecutionEngine, get_task, log_event, redact, set_task
-from .fleet import credential_key, disk_free_bytes, settings as fleet_settings
+from .fleet import (cooldown_remaining, credential_id, credential_key, disk_free_bytes,
+                    settings as fleet_settings)
 from .git_ops import repository, run
 from .validation import scopes_may_overlap
 
@@ -93,12 +94,19 @@ class TaskScheduler:
             if free_disk < required_free:
                 return False
             if agent and agent.get("adapter") != "handoff":
+                if con.execute("SELECT 1 FROM credential_cooldowns WHERE credential_key=? "
+                               "AND julianday(expires_at)>julianday('now')", (credential_id(agent),)).fetchone():
+                    return False
                 adapter, executable = credential_key(agent)
                 used = con.execute(f"""SELECT COUNT(*) FROM tasks t JOIN agents a ON a.id=t.assigned_agent_id
                     WHERE t.status IN ({marks}) AND a.adapter=? AND
                     COALESCE(json_extract(a.command,'$[0]'),a.adapter)=?""",
                     (*active_states, adapter, executable)).fetchone()[0]
                 if used >= config["max_per_credential"]:
+                    return False
+                used_by_agent = con.execute(f"SELECT COUNT(*) FROM tasks WHERE status IN ({marks}) "
+                                            "AND assigned_agent_id=?", (*active_states, agent["id"])).fetchone()[0]
+                if used_by_agent >= agent.get("max_parallel", 1):
                     return False
             result = con.execute("""UPDATE tasks SET status='planning',assigned_agent_id=COALESCE(?,assigned_agent_id),
                 updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('queued','waiting_for_scope')""",
@@ -146,6 +154,8 @@ class TaskScheduler:
         if task["preferred_agent_id"]:
             candidates.sort(key=lambda agent: agent["id"] != task["preferred_agent_id"])
         for agent in candidates:
+            if cooldown_remaining(agent) > 0:
+                continue
             if agent["adapter"] == "handoff":
                 return agent
             if agent["available"] and self.agent_counts.get(agent["id"], 0) < agent["max_parallel"]:
