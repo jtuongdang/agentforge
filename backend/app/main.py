@@ -582,6 +582,18 @@ def rag_search(repository_id: str, q: str, limit: int = 6):
         raise HTTPException(422, str(exc)) from exc
 
 
+@app.get("/api/repositories/{repository_id}/code-context")
+def repository_code_context(repository_id: str, q: str = Query(min_length=1, max_length=500),
+                            limit: int = Query(default=6, ge=1, le=12),
+                            max_chars: int = Query(default=4000, ge=256, le=8000)):
+    from . import code_context
+    try:
+        repo = repository(repository_id)
+        return code_context.search(repository_id, repo["path"], q, max_chars=max_chars, limit=limit)
+    except Exception as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @app.post("/api/repositories", status_code=201)
 def add_repository(body: RepositoryCreate):
     try:

@@ -17,7 +17,8 @@ ROOT_GUIDANCE_FILES = (
 
 
 def load_project_guidance(repository_root: str | Path, file_globs: list[str],
-                          repository_id: str | None = None, query: str = "") -> tuple[str, list[str]]:
+                          repository_id: str | None = None, query: str = "",
+                          include_rag: bool = True) -> tuple[str, list[str]]:
     """Collect bounded system and repository instructions before an Agent starts editing."""
     root = Path(repository_root).expanduser().resolve()
     candidates: list[tuple[Path, str]] = []
@@ -67,7 +68,7 @@ def load_project_guidance(repository_root: str | Path, file_globs: list[str],
         sections.append(f"### {display_name}\n\n{content.strip()}")
         consumed += len(content)
     rag_block = ""
-    if repository_id and query.strip():
+    if include_rag and repository_id and query.strip():
         from .rag import retrieve_excerpts
         rag_block, rag_files = retrieve_excerpts(repository_id, root, query, MAX_RAG_CHARS,
                                                  exclude_paths={n for n in filenames})

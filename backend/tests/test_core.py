@@ -1431,6 +1431,132 @@ def test_rag_dedupes_sections_and_prefers_decision_docs(tmp_path, monkeypatch):
     assert len({(h["path"], h["heading"]) for h in hits}) == len(hits)
 
 
+def test_code_context_is_revision_worktree_scoped_and_skips_secrets(tmp_path, monkeypatch):
+    import sqlite3
+    from app import code_context
+
+    monkeypatch.setattr(code_context, "CONTEXT_DB_PATH", tmp_path / "context.sqlite3")
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Fixture"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "fixture@example.invalid"], check=True)
+    source = root / "src" / "billing.py"
+    source.parent.mkdir()
+    source.write_text("def calculate_tax(amount):\n    return amount * 0.1\n", encoding="utf-8")
+    (root / "src" / "secret_config.py").write_text(
+        "token=ghp_abcdefghijklmnopqrstuvwxyz123456\n", encoding="utf-8")
+    (root / "src" / "broken.py").write_text("def broken(:\n    pass\n", encoding="utf-8")
+    (root / "docs").mkdir()
+    (root / "docs" / "operations.md").write_text(
+        "# Worker shutdown\n\nTerminate descendants before transferring the writer lease.\n",
+        encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-m", "tax implementation"], check=True,
+                   capture_output=True)
+    revision_one = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+    first = code_context.search("repo-1", root, "calculate tax", revision_one, max_chars=1000)
+
+    assert first["revision"] == revision_one
+    assert first["citations"][0]["path"] == "src/billing.py"
+    assert first["citations"][0]["start_line"] == 1
+    assert revision_one[:12] in first["context"]
+    assert first["stats"]["skipped_secrets"] == 1
+    assert first["stats"]["parse_errors"] == 1
+    assert first["symbols"][0]["qualified_name"] == "calculate_tax"
+    markdown = code_context.search("repo-1", root, "terminate descendants", revision_one)
+    assert markdown["citations"][0]["path"] == "docs/operations.md"
+    assert markdown["citations"][0]["kind"] == "markdown"
+
+    mirror = tmp_path / "mirror"
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "--detach", str(mirror), revision_one],
+                   check=True, capture_output=True)
+    mirrored = code_context.search("repo-1", mirror, "calculate tax", revision_one)
+    assert mirrored["citations"][0]["worktree"] == str(mirror)
+    with sqlite3.connect(code_context.CONTEXT_DB_PATH) as con:
+        indexed_worktrees = con.execute("SELECT DISTINCT worktree FROM source_files").fetchall()
+    assert {row[0] for row in indexed_worktrees} == {str(root), str(mirror)}
+
+    (root / "src" / "untracked.py").write_text("def injected(): pass\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="clean worktree"):
+        code_context.search("repo-1", root, "injected", revision_one)
+    (root / "src" / "untracked.py").unlink()
+    source.write_text("def calculate_tax(amount):\n    return amount * 0.9\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="clean worktree"):
+        code_context.search("repo-1", root, "calculate tax", revision_one)
+    source.write_text("def calculate_tax(amount):\n    return amount * 0.1\n", encoding="utf-8")
+
+    source.write_text("def calculate_discount(amount):\n    return amount * 0.2\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "src/billing.py"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-m", "discount implementation"], check=True,
+                   capture_output=True)
+    revision_two = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+    second = code_context.search("repo-1", root, "calculate discount", revision_two, max_chars=600)
+    old = code_context.search("repo-1", root, "calculate tax", revision_two, max_chars=600)
+
+    assert revision_two != revision_one
+    assert second["citations"] and all(hit["revision"] == revision_two for hit in second["citations"])
+    assert len(second["context"]) <= 600
+    assert all(hit["revision"] == revision_two for hit in old["citations"])
+    assert "calculate_tax" not in old["context"]
+    assert old["symbols"] == []
+
+    renamed = root / "src" / "pricing.py"
+    source.rename(renamed)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-m", "rename billing service"], check=True,
+                   capture_output=True)
+    revision_three = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True,
+                                    capture_output=True, text=True).stdout.strip()
+    moved = code_context.search("repo-1", root, "calculate discount", revision_three)
+    assert moved["stats"]["removed"] >= 1
+    assert moved["citations"] and all(hit["path"] == "src/pricing.py" for hit in moved["citations"])
+
+    renamed.unlink()
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-m", "remove pricing service"], check=True,
+                   capture_output=True)
+    revision_four = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True,
+                                   capture_output=True, text=True).stdout.strip()
+    removed = code_context.search("repo-1", root, "calculate discount", revision_four)
+    assert removed["stats"]["removed"] >= 1
+    assert removed["citations"] == [] and removed["symbols"] == []
+
+
+def test_code_context_api_returns_revision_citations_and_budget(tmp_path, monkeypatch):
+    from app import code_context
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "code-context-api.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    monkeypatch.setattr(code_context, "CONTEXT_DB_PATH", tmp_path / "context.sqlite3")
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Fixture"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "fixture@example.invalid"], check=True)
+    (root / "service.py").write_text("def calculate_invoice_total(items):\n    return sum(items)\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "service.py"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-m", "add invoice service"], check=True,
+                   capture_output=True)
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path,default_branch) VALUES('r','fixture',?,'main')",
+                    (str(root),))
+
+    with authenticated_test_client(monkeypatch) as client:
+        response = client.get("/api/repositories/r/code-context?q=invoice%20total&max_chars=512")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["citations"][0]["path"] == "service.py"
+    assert body["citations"][0]["revision"] == body["revision"]
+    assert len(body["context"]) <= 512
+
+
 def test_prune_events_removes_old_noise_but_keeps_milestones_and_active(tmp_path, monkeypatch):
     from app import storage
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "events.sqlite3")

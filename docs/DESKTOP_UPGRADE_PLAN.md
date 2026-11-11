@@ -269,6 +269,8 @@ Auto-review ở phase này tạo nhận xét/quyết định có audit. Auto-pub
 
 **Thứ tự thực hiện:** chốt stack/parser được hỗ trợ → lập chỉ mục theo commit → symbols/chunks → query API có budget/citation → context injection đúng revision → đánh giá quality/performance/privacy trước mở rộng parser.
 
+**Tiến độ thực thi (11/11/2026):** đã thêm index Python AST + Markdown FTS trong `rag.sqlite3`, tách khỏi index Markdown legacy; phạm vi cache khóa theo repository ID, SHA và đường dẫn worktree. Chỉ file `.py`/`.md` tracked trong Git được index; worktree phải sạch để nội dung không bị gắn nhầm với SHA. Bỏ qua secret-bearing, symlink, file lớn và thư mục generated/vendor; syntax error có thống kê riêng. Query trả citation path/line/SHA/worktree/hash, giới hạn context và kiểm tra hash file trước khi xuất snippet. API `/api/repositories/{id}/code-context` và planner lấy context trước khi chạy agent từ worktree đã pin revision; lỗi index được ghi rõ và task tiếp tục với project guidance. Regression bao phủ repo/revision/worktree isolation, secret, dirty/untracked file, parse error, symbol hit/miss, rename/delete và budget. **Kiểm chứng:** 2 test Code Context pass; toàn backend suite 71 passed, 1 cảnh báo deprecation; fixture 100 file: cold index 0.065 s, incremental query/index 0.058 s, truy vấn duy nhất trả đúng `src/module_042.py:1`. **Phase 6 còn mở:** cần đánh giá retrieval trên repo thực có bộ query/gold set, kiểm tra fallback/legacy Markdown RAG sau tích hợp UI, và xem lại hiệu năng/privacy trên dataset lớn trước khi mở rộng parser.
+
 ### Phase 7 — Phát hành và thương mại hóa
 
 Tách thành bốn subphase có thể phát hành độc lập:

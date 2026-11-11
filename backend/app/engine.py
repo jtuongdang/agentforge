@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import db
+from . import code_context
 from .git_ops import repository
 from .fleet import credential_key, set_credential_cooldown, transfer_task_to_rescue
 from .recovery import RecoveryManager
@@ -79,17 +80,43 @@ class AgentExecutionEngine:
         task["base_branch"] = task.get("base_branch") or repo["default_branch"]
         set_task(task_id, "planning", assigned_agent_id=agent["id"])
         log_event(task_id, "planning", f"Planner prepared bounded task for {agent['name']}.", agent_id=agent["id"])
-        guidance, guidance_files = load_project_guidance(
-            repo["path"], task["file_globs"], task["repository_id"], f'{task["title"]} {task["objective"]}')
-        plan = self.planner.plan(task["title"], task["objective"], task["file_globs"],
-                                 task["required_capabilities"], task.get("acceptance_criteria", []),
-                                 guidance, guidance_files)
-        log_event(task_id, "project_guidance_loaded",
-                  f"Loaded {len(guidance_files)} project guidance document(s) before Agent execution.",
-                  {"files": guidance_files}, agent_id=agent["id"])
         try:
             branch, worktree = await asyncio.to_thread(
                 self.worktrees.prepare, repo, task_id, task.get("base_sha") or task["base_branch"], task["title"])
+            query = f'{task["title"]} {task["objective"]}'
+            guidance, guidance_files = load_project_guidance(
+                worktree, task["file_globs"], task["repository_id"], query, include_rag=False)
+            try:
+                context_result = await asyncio.to_thread(
+                    code_context.search, task["repository_id"], worktree, query,
+                    max_chars=code_context.MAX_CONTEXT_CHARS,
+                    exclude_paths={name for name in guidance_files if not name.startswith("Orchestrator baseline:")})
+                if context_result["context"]:
+                    guidance += "\n\n" + context_result["context"]
+                    guidance_files.extend(
+                        f"{hit['path']}:{hit['start_line']}-{hit['end_line']} @ {hit['revision'][:12]} (source context)"
+                        for hit in context_result["citations"])
+                if context_result["stats"]["parse_errors"] or context_result["stats"]["truncated"]:
+                    log_event(task_id, "code_context_partial",
+                              "Source context is partial because some files could not be parsed or indexing limits were reached.",
+                              {"revision": context_result["revision"], "parse_errors": context_result["stats"]["parse_errors"],
+                               "truncated": context_result["stats"]["truncated"]},
+                              agent_id=agent["id"])
+            except Exception as exc:
+                context_result = None
+                log_event(task_id, "code_context_unavailable",
+                          "Revision-pinned source context could not be indexed; continuing with repository guidance only.",
+                          {"error_type": type(exc).__name__}, agent_id=agent["id"])
+            plan = self.planner.plan(task["title"], task["objective"], task["file_globs"],
+                                     task["required_capabilities"], task.get("acceptance_criteria", []),
+                                     guidance, guidance_files)
+            context_details = ({"revision": context_result["revision"], "citations": context_result["citations"],
+                                "indexed": context_result["stats"]["indexed"],
+                                "unchanged": context_result["stats"]["unchanged"]}
+                               if context_result else {"available": False})
+            log_event(task_id, "project_guidance_loaded",
+                      f"Loaded {len(guidance_files)} guidance and revision-pinned source citation(s) before Agent execution.",
+                      {"files": guidance_files, "source_context": context_details}, agent_id=agent["id"])
             task_file = db.DATA_ROOT / "handoffs" / f"{task_id}.md"
             task_file.parent.mkdir(parents=True, exist_ok=True)
             task_content = self._task_markdown(task, plan, branch, worktree)
