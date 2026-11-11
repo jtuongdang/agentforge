@@ -980,6 +980,29 @@ def test_antigravity_write_permissions_reject_path_traversal(tmp_path):
         AgentExecutionEngine._antigravity_write_permissions(str(tmp_path), ["../outside.txt"])
 
 
+def test_recovery_classifies_auth_rate_limit_timeout_and_blocked_failures():
+    from app.recovery import RecoveryManager
+
+    assert RecoveryManager.classify(1, ["HTTP 401 invalid API key"]).category == "auth"
+    limited = RecoveryManager.classify(1, ["429 Too Many Requests", "Retry-After: 12"])
+    assert limited.category == "rate_limit"
+    assert limited.retryable is True
+    assert limited.retry_after_seconds == 12
+    assert RecoveryManager.classify(124).category == "timeout"
+    blocked = RecoveryManager.classify(0, validation={"blocked": True, "reason": "possible_secret"})
+    assert blocked.category == "blocked"
+    assert blocked.retryable is False
+
+
+def test_recovery_backoff_is_bounded_and_honors_retry_after():
+    from app.recovery import RecoveryManager
+
+    assert RecoveryManager.backoff_seconds(0) == 1
+    assert RecoveryManager.backoff_seconds(3) == 8
+    assert RecoveryManager.backoff_seconds(5, 50) == 50
+    assert RecoveryManager.backoff_seconds(9, 500) == 60
+
+
 def test_antigravity_write_permissions_reject_symlink_escape(tmp_path):
     from app.engine import AgentExecutionEngine
 

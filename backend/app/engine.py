@@ -102,6 +102,17 @@ class AgentExecutionEngine:
 
             validation = {}
             last_error = None
+
+            def finish_failed_run(run_id: str, code: int, error: str, result: dict,
+                                  output_tail: list[str], checkpoint: dict | None = None):
+                failure = self.recovery.classify(code, output_tail, result, error)
+                with db.transaction() as con:
+                    con.execute("UPDATE runs SET state='failed',exit_code=?,finished_at=CURRENT_TIMESTAMP,report=? WHERE id=?",
+                                (code, db.dumps({"error": error, "failure_class": failure.category,
+                                                "retryable": failure.retryable, "checkpoint": checkpoint,
+                                                **result}), run_id))
+                return failure
+
             for attempt in range(task["max_retries"] + 1):
                 set_task(task_id, "running", retries=attempt)
                 run_id = str(uuid.uuid4())
@@ -111,22 +122,48 @@ class AgentExecutionEngine:
                 prompt = task_content
                 if last_error:
                     prompt += f"\n\nRepair attempt {attempt}: previous validation failed:\n{last_error}\nFix this and re-run the relevant checks."
-                code = await self._invoke(agent, worktree, task_file, prompt, task_id, task["file_globs"])
+                output_tail: list[str] = []
+                def remember_output(line: str) -> None:
+                    output_tail.append(redact(line)[:1000])
+                    del output_tail[:-40]
+                code = await self._invoke(agent, worktree, task_file, prompt, task_id, task["file_globs"],
+                                          on_output=remember_output)
+                checkpoint = None
                 if code != 0:
                     last_error = f"Agent process exited with status {code}."
+                    paths = await asyncio.to_thread(self.worktrees.changed_paths, worktree,
+                                                    task.get("base_sha") or task.get("base_branch"))
+                    outside = self.validation.inspect_scope(paths, task["file_globs"], agent["file_globs"])
+                    secret_files = self.validation.inspect_secrets(worktree, paths)
+                    checkpoint = {"retained_worktree": worktree,
+                                  "base_ref": task.get("base_sha") or task.get("base_branch"),
+                                  "changed_paths": paths, "scanned": True}
+                    if outside or secret_files:
+                        reason = "out_of_scope" if outside else "possible_secret"
+                        blocked_paths = outside or secret_files
+                        validation = {"passed": False, "blocked": True, "reason": reason, "paths": blocked_paths}
+                        last_error = (f"Changes outside declared file scope: {', '.join(outside)}" if outside else
+                                      f"Possible secret content in changed files: {', '.join(secret_files)}")
+                        finish_failed_run(run_id, code, last_error, validation, output_tail, checkpoint)
+                        break
                 else:
                     paths = await asyncio.to_thread(self.worktrees.changed_paths, worktree,
                                                     task.get("base_sha") or task.get("base_branch"))
+                    checkpoint = {"retained_worktree": worktree,
+                                  "base_ref": task.get("base_sha") or task.get("base_branch"),
+                                  "changed_paths": paths, "scanned": True}
                     outside = self.validation.inspect_scope(paths, task["file_globs"], agent["file_globs"])
                     secret_files = self.validation.inspect_secrets(worktree, paths)
                     if outside:
                         validation = {"passed": False, "blocked": True, "reason": "out_of_scope",
                                       "paths": outside}
                         last_error = f"Changes outside declared file scope: {', '.join(validation['paths'])}"
+                        finish_failed_run(run_id, code, last_error, validation, output_tail, checkpoint)
                         break
                     if secret_files:
                         validation = {"passed": False, "blocked": True, "reason": "possible_secret", "paths": secret_files}
                         last_error = f"Possible secret content in changed files: {', '.join(secret_files)}"
+                        finish_failed_run(run_id, code, last_error, validation, output_tail, checkpoint)
                         break
                     set_task(task_id, "validating")
                     if self.build_slots:
@@ -152,13 +189,21 @@ class AgentExecutionEngine:
                         return
                     last_error = validation.get("summary", "Validation failed")
                     if validation.get("blocked"):
+                        finish_failed_run(run_id, code, last_error, validation, output_tail, checkpoint)
                         break
-                with db.transaction() as con:
-                    con.execute("UPDATE runs SET state='failed',exit_code=?,finished_at=CURRENT_TIMESTAMP,report=? WHERE id=?",
-                                (code, db.dumps({"error": last_error, **validation}), run_id))
-                if self.recovery.should_retry(attempt, task["max_retries"], bool(validation.get("blocked"))):
+                failure = finish_failed_run(run_id, code, last_error or "", validation, output_tail, checkpoint)
+                if (failure.retryable and
+                        self.recovery.should_retry(attempt, task["max_retries"], bool(validation.get("blocked")))):
+                    delay = self.recovery.backoff_seconds(attempt, failure.retry_after_seconds)
                     set_task(task_id, "recovering", retries=attempt + 1, error=last_error)
-                    log_event(task_id, "recovering", f"Bounded recovery retry {attempt + 1}/{task['max_retries']}: {last_error}", agent_id=agent["id"])
+                    log_event(task_id, "recovering",
+                              f"Bounded {failure.category} recovery retry {attempt + 1}/{task['max_retries']} "
+                              f"after {delay:g}s: {last_error}",
+                              {"failure_class": failure.category, "retry_after_seconds": failure.retry_after_seconds,
+                               "backoff_seconds": delay}, agent_id=agent["id"])
+                    await asyncio.sleep(delay)
+                else:
+                    break
             final_status = "blocked" if validation.get("blocked") else "failed"
             set_task(task_id, final_status, error=last_error, validation=validation,
                      finished_at=datetime.now(timezone.utc).isoformat())
@@ -173,7 +218,7 @@ class AgentExecutionEngine:
             log_event(task_id, "failed", message, agent_id=agent["id"])
 
     async def _invoke(self, agent: dict, worktree: str, task_file: Path, prompt: str, task_id: str,
-                      file_globs: list[str] | None = None) -> int:
+                      file_globs: list[str] | None = None, on_output=None) -> int:
         command = agent["command"]
         if agent["adapter"] == "codex":
             executable = command[0] if command else shutil.which("codex")
@@ -250,6 +295,8 @@ class AgentExecutionEngine:
                 while line := await proc.stdout.readline():
                     decoded = line.decode("utf-8", errors="replace").strip()
                     if decoded:
+                        if on_output:
+                            on_output(decoded)
                         log_event(task_id, "agent_log", self._event_summary(decoded), agent_id=agent["id"])
             try:
                 await asyncio.wait_for(asyncio.gather(stream_output(), proc.wait()), timeout=3600)
