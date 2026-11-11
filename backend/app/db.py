@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from .settings import settings
 
 ROOT = Path(__file__).resolve().parents[2]
-DB_PATH = Path(os.getenv("CLINIC_ORCHESTRATOR_DB", ROOT / "data" / "orchestrator.sqlite3"))
+DATA_ROOT = settings.data_dir
+DB_PATH = Path(os.getenv("CLINIC_ORCHESTRATOR_DB", DATA_ROOT / "orchestrator.sqlite3")).expanduser()
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
@@ -50,7 +53,25 @@ def rowdict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
+def backup_before_migration() -> Path | None:
+    """Create a SQLite-consistent safety copy before applying a schema upgrade."""
+    if not DB_PATH.is_file() or DB_PATH.stat().st_size == 0:
+        return None
+    with sqlite3.connect(DB_PATH, timeout=20) as source:
+        version = source.execute("PRAGMA user_version").fetchone()[0]
+        tables = source.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
+        if version >= 1 or tables == 0:
+            return None
+        backup_dir = DB_PATH.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        target = backup_dir / f"pre-migration-v{version}-{time.time_ns()}.sqlite3"
+        with sqlite3.connect(target) as destination:
+            source.backup(destination)
+    return target
+
+
 def init_db() -> None:
+    backup_before_migration()
     with transaction() as con:
         con.executescript("""
         CREATE TABLE IF NOT EXISTS repositories (
@@ -126,6 +147,7 @@ def init_db() -> None:
         for name, declaration in migrations.items():
             if name not in columns:
                 con.execute(f"ALTER TABLE agents ADD COLUMN {name} {declaration}")
+        con.execute("PRAGMA user_version=1")
 
 
 def event(task_id: str | None, kind: str, message: str, details: Any = None, agent_id: str | None = None) -> None:

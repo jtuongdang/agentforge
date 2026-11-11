@@ -35,18 +35,21 @@ class ValidationEngine:
     async def validate(self, worktree: str, log, profile: str = "auto",
                        command: list[str] | None = None,
                        paths: list[str] | None = None) -> dict:
-        if profile == "custom" and command:
-            return await run_configured_validation(worktree, command, log)
+        if profile in {"custom", "node", "python", "go"}:
+            if command:
+                return await run_configured_validation(worktree, command, log)
+            return {"passed": False, "blocked": True, "profile": profile, "command": None,
+                    "exit_code": None, "summary": "This validation profile has no configured argv command."}
         documentation_suffixes = (".md", ".txt", ".rst")
         if paths and all(Path(p).suffix.lower() in documentation_suffixes for p in paths):
             log("validation", "All changed files are documentation; project build validation was skipped.")
             return {"passed": True, "blocked": False, "profile": "docs_skip", "command": None,
                     "exit_code": 0, "summary": "Documentation-only change passed the configured docs policy."}
-        if profile == "auto" and (Path(worktree) / "pom.xml").is_file():
+        if profile in {"auto", "maven"} and (Path(worktree) / "pom.xml").is_file():
             return await run_maven_verify(worktree, log)
         return {"passed": False, "blocked": True, "profile": "unsupported", "command": None,
                 "exit_code": None, "summary": "No validation profile is configured for this repository. "
-                "Auto mode supports Maven projects with a root pom.xml; configure a custom argv command for other stacks."}
+                "Auto and Maven profiles support projects with a root pom.xml; configure a reviewed argv command for other stacks."}
 
     async def maven_verify(self, worktree: str, log) -> dict:
         """Compatibility entry point for callers that explicitly require Maven."""

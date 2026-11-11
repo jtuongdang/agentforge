@@ -140,7 +140,7 @@ def create_worktree(repo: dict, task_id: str, base_ref: str, title: str) -> tupl
               for ref in (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}")):
         branch = f"{root_branch}-{suffix}"
         suffix += 1
-    worktree = Path(db.ROOT) / "data" / "worktrees" / repo["id"] / task_id
+    worktree = db.DATA_ROOT / "worktrees" / repo["id"] / task_id
     worktree.parent.mkdir(parents=True, exist_ok=True)
     require_ok(["git", "worktree", "add", "-b", branch, str(worktree), base], root, timeout=120)
     return branch, str(worktree)
@@ -192,6 +192,18 @@ def validated_revision_is_current(worktree: str, validated_head: str | None) -> 
     return status.returncode == 0 and not status.stdout.strip()
 
 
+def git_author(worktree: str) -> tuple[str, str]:
+    """Use repo-local identity first, then the user's global Git identity, then a safe fallback."""
+    def configured(scope: str, key: str) -> str | None:
+        result = run(["git", "config", scope, "--get", key], worktree)
+        value = result.stdout.strip()
+        return value if result.returncode == 0 and value else None
+
+    name = configured("--local", "user.name") or configured("--global", "user.name")
+    email = configured("--local", "user.email") or configured("--global", "user.email")
+    return (name or "DevAgent Orchestrator", email or "orchestrator@localhost")
+
+
 def is_github_remote(remote: str | None) -> bool:
     if not remote:
         return False
@@ -214,7 +226,8 @@ def commit_changes(worktree: str, paths: list[str], task_id: str, title: str, ba
     if has_uncommitted:
         require_ok(["git", "add", "--", *paths], worktree)
         safe_title = re.sub(r"[\r\n]+", " ", title).strip()[:60]
-        result = run(["git", "-c", "user.name=DevAgent Orchestrator", "-c", "user.email=orchestrator@localhost",
+        author_name, author_email = git_author(worktree)
+        result = run(["git", "-c", f"user.name={author_name}", "-c", f"user.email={author_email}",
                       "commit", "-m", f"task: {safe_title} ({task_id[:8]})"], worktree, timeout=120)
         if result.returncode != 0:
             raise RuntimeError((result.stderr or result.stdout).strip()[-3000:])

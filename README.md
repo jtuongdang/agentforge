@@ -26,7 +26,7 @@ cd ~/Documents/ClinicOrchestrator
 ./scripts/dev.sh
 ```
 
-The launcher creates `.venv`, installs the pinned Python requirements, starts FastAPI, and serves the Vite dashboard. The API binds only to `127.0.0.1:8765`. Data is stored under `data/orchestrator.sqlite3`. Register any local Git checkout from the dashboard before creating tasks; startup does not assume a particular target project.
+The launcher creates `.venv`, installs the pinned Python requirements, starts FastAPI, and serves the Vite dashboard. The API binds to loopback (`127.0.0.1:8765` by default; override with `CLINIC_ORCHESTRATOR_HOST` and `CLINIC_ORCHESTRATOR_PORT`). Development data is under `data/`; packaged builds use the platform application data directory. Override it with `CLINIC_ORCHESTRATOR_DATA_DIR` or point SQLite at a specific file with `CLINIC_ORCHESTRATOR_DB`. Register any local Git checkout from the dashboard before creating tasks; startup does not assume a particular target project.
 
 ## Safety boundaries
 
@@ -43,7 +43,7 @@ The launcher creates `.venv`, installs the pinned Python requirements, starts Fa
 - Parallel tasks must have independent file scopes or a pre-approved contract; the scheduler reserves capacity per agent and creates a separate worktree for each task.
 - On backend restart, queued tasks remain queued; interrupted execution is marked failed and an interrupted publish is blocked for manual remote review. Worktrees are retained.
 - `/api/health` checks SQLite integrity and reports scheduler, task, repository, and Agent availability counts. `scripts/db_snapshot.py` creates consistent SQLite backups and restores only to a new file, refusing to overwrite existing data.
-- Local API routes require a bearer token. The dashboard obtains it from the loopback-only `/api/session` endpoint; by default the token is stored in `data/api-token` with owner-only permissions on POSIX. WebSocket events use short-lived, one-time tickets. Do not include the token in task prompts or logs.
+- Local API routes require a bearer token. The dashboard obtains it from the loopback-only `/api/session` endpoint; by default the token is stored as `api-token` in the app data directory with owner-only permissions on POSIX. WebSocket events use short-lived, one-time tickets. Do not include the token in task prompts or logs.
 - Worktree cleanup is preview-only by default. `python scripts/cleanup_worktrees.py --apply` removes only aged, clean task worktrees whose commits are already ancestors of the selected base; dirty, ignored, untracked, handoff, and unmerged worktrees remain for review. Build folders are not deleted automatically.
 - The dashboard's **Storage** page shows SQLite/WAL size, worktree/build usage, managed data totals, record counts and free disk space. It refreshes when opened and every 30 seconds; it is read-only and does not clean up data automatically.
 - Before each Agent run, the Orchestrator injects [PROJECT_CONVENTIONS.md](docs/PROJECT_CONVENTIONS.md) and reads repository `AGENTS.md`/guidance files plus scoped ancestor instructions; the task package lists them and requires the Agent to report them.

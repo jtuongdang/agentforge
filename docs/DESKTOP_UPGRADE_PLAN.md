@@ -201,7 +201,7 @@ Mỗi phase cần có: (a) API/schema/UX decision đã duyệt, (b) thay đổi 
 
 **Điều kiện hoàn thành:** suite xanh; đủ regression cho commit hỗn hợp, nhiều commit, docs executable, dirty cleanup, đổi SHA sau validation, cancel process tree, dependency integration; REST/WS từ client chưa được cấp quyền bị từ chối. Không yêu cầu chạy AI thật để chứng minh các invariant này.
 
-**Tiến độ thực thi (11/11/2026):** Đang hoàn thiện Phase 0. Đã sửa changeset/diff theo base SHA, cleanup mặc định preview và chỉ xóa worktree sạch đã tích hợp, validation docs-only, token cho API local và ticket một lần cho WebSocket, process-group cancellation, dependency cùng repo và commit tích hợp, kiểm tra revision trước review/publish/complete. Regression hiện có: **45 passed**; dashboard production build pass; lint exit 0 với 6 warning React còn lại. Đang rà soát và chuẩn bị commit/push sau khi chạy lại kiểm định cuối.
+**Tiến độ thực thi (11/11/2026):** Phase 0 đã hoàn tất và push commit `8ea7d57` lên `codex/desktop-upgrade`. Changeset/diff dùng base SHA; cleanup preview và chỉ xóa worktree sạch đã tích hợp; docs-only policy không bỏ validator bắt buộc; API local có token, WebSocket dùng ticket một lần; process-group cancellation; dependency cùng repo và commit đã vào base; revision được kiểm tra trước review/publish/complete. Tại cổng G0: **45 passed**; dashboard production build pass; lint exit 0 với 6 warning React; `git diff --check` sạch.
 
 ### Phase 1 — Cấu hình và onboarding backend
 
@@ -212,6 +212,8 @@ Mỗi phase cần có: (a) API/schema/UX decision đã duyệt, (b) thay đổi 
 **Điều kiện hoàn thành:** DB trống vào onboarding; repo bất kỳ hợp lệ đăng ký được; repo dirty báo rõ worktree chỉ lấy committed base; thiếu tool/identity/validator có hướng dẫn cụ thể; dữ liệu cũ nâng cấp được từ snapshot test; không viết vào bundle.
 
 **Thứ tự thực hiện:** cấu hình đường dẫn → versioned migration/backup → preflight API → validator profiles → Git identity → onboarding UI contract. Định dạng settings và response phải ổn định trước khi Desktop tiêu thụ.
+
+**Tiến độ thực thi (11/11/2026):** Phase 1 đã hoàn tất trên working tree sau Phase 0. Đã thêm cấu hình tập trung, writable data directory theo platform khi đóng gói, schema `user_version` + snapshot SQLite trước migration, API setup status/preflight (Git/base/dirty/disk/validator/Agent CLI), profile Maven/Node/Python/Go/custom theo argv, Git identity repo-local/global/fallback và cấu hình host/port loopback. Kiểm định: **50 passed**; dashboard production build pass; lint exit 0 với 6 warning React; snapshot CLI khởi chạy được; `git diff --check` sạch. Chưa đóng gói ứng dụng native ở phase này.
 
 ### Phase 2 — Desktop alpha
 

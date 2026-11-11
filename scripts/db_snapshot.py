@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DB = ROOT / "data" / "orchestrator.sqlite3"
+sys.path.insert(0, str(ROOT / "backend"))
+from app.settings import default_data_dir  # noqa: E402
+
+DEFAULT_DB = Path(os.getenv("CLINIC_ORCHESTRATOR_DB", default_data_dir() / "orchestrator.sqlite3")).expanduser()
 
 
 def integrity_check(path: Path) -> None:
@@ -61,7 +65,7 @@ def restore_database(backup: Path, destination: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, default=DEFAULT_DB,
-                        help="active database path (default: data/orchestrator.sqlite3)")
+                        help=f"active database path (default: {DEFAULT_DB})")
     commands = parser.add_subparsers(dest="action", required=True)
     backup = commands.add_parser("backup", help="create a consistent SQLite backup")
     backup.add_argument("destination", type=Path)

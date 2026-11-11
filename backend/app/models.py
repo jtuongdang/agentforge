@@ -7,7 +7,7 @@ class RepositoryCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     path: str = Field(min_length=1)
     default_branch: str = "main"
-    validation_profile: str = Field(default="auto", pattern="^(auto|custom)$")
+    validation_profile: str = Field(default="auto", pattern="^(auto|maven|node|python|go|custom)$")
     validation_command: list[str] = Field(default_factory=list, max_length=12)
 
     @field_validator("validation_command")
@@ -20,10 +20,33 @@ class RepositoryCreate(BaseModel):
 
     @model_validator(mode="after")
     def require_custom_command(self):
-        if self.validation_profile == "custom" and not self.validation_command:
-            raise ValueError("A custom validation profile requires an argv command")
-        if self.validation_profile == "auto" and self.validation_command:
-            raise ValueError("An auto validation profile cannot include a custom command")
+        if self.validation_profile in {"custom", "node", "python", "go"} and not self.validation_command:
+            raise ValueError("This validation profile requires an explicit argv command")
+        if self.validation_profile in {"auto", "maven"} and self.validation_command:
+            raise ValueError("This validation profile does not accept a custom command")
+        return self
+
+
+class RepositoryPreflight(BaseModel):
+    path: str = Field(min_length=1)
+    default_branch: str = "main"
+    validation_profile: str = Field(default="auto", pattern="^(auto|maven|node|python|go|custom)$")
+    validation_command: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("validation_command")
+    @classmethod
+    def validate_command(cls, values: list[str]) -> list[str]:
+        cleaned = [value.strip() for value in values]
+        if any(not value or len(value) > 300 or "\n" in value or "\r" in value for value in cleaned):
+            raise ValueError("Each validation command argument must be a non-empty token of at most 300 characters")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_profile_command(self):
+        if self.validation_profile in {"custom", "node", "python", "go"} and not self.validation_command:
+            raise ValueError("This validation profile requires an explicit argv command")
+        if self.validation_profile in {"auto", "maven"} and self.validation_command:
+            raise ValueError("This validation profile does not accept a custom command")
         return self
 
 

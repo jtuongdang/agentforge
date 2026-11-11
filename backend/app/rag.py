@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import db
 
-RAG_DB_PATH = Path(os.getenv("CLINIC_ORCHESTRATOR_RAG_DB", db.ROOT / "data" / "rag.sqlite3"))
+RAG_DB_PATH = Path(os.getenv("CLINIC_ORCHESTRATOR_RAG_DB", db.DATA_ROOT / "rag.sqlite3"))
 SKIP_DIRS = {".git", "target", "node_modules", ".idea", ".venv", "dist", "build", "data"}
 MAX_FILE_BYTES = 1_500_000
 CHUNK_CHARS = 1_800

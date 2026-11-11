@@ -238,6 +238,101 @@ def test_bootstrap_does_not_assume_or_register_a_default_product_repository(tmp_
         assert con.execute("SELECT COUNT(*) FROM repositories").fetchone()[0] == 0
 
 
+def test_setup_preflight_reports_dirty_repo_base_tools_and_git_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "setup.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "app-data")
+    monkeypatch.setattr("app.main.registry.refresh", lambda: [])
+    repo = tmp_path / "project"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Repo Owner"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "owner@example.invalid"], check=True)
+    (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "initial"], check=True, capture_output=True)
+    base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+    (repo / "uncommitted.txt").write_text("left behind", encoding="utf-8")
+
+    with authenticated_test_client(monkeypatch) as client:
+        status = client.get("/api/setup/status")
+        assert status.status_code == 200
+        assert status.json()["needs_onboarding"] is True
+        response = client.post("/api/repositories/preflight", json={"path": str(repo), "default_branch": "main",
+            "validation_profile": "python", "validation_command": ["missing-fixture-validator"]})
+
+    assert response.status_code == 200, response.text
+    report = response.json()
+    assert report["repository_root"] == str(repo)
+    assert report["base_sha"] == base
+    assert report["working_tree_dirty"] is True
+    assert report["dirty_base_note"]
+    assert report["git_author"] == {"name": "Repo Owner", "email": "owner@example.invalid"}
+    assert report["validator_available"] is False
+
+
+def test_git_author_prefers_repository_identity_over_global(tmp_path, monkeypatch):
+    from app.git_ops import git_author
+
+    global_config = tmp_path / "gitconfig"
+    subprocess.run(["git", "config", "--file", str(global_config), "user.name", "Global Person"], check=True)
+    subprocess.run(["git", "config", "--file", str(global_config), "user.email", "global@example.invalid"], check=True)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    repo = tmp_path / "identity-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    assert git_author(str(repo)) == ("Global Person", "global@example.invalid")
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Repository Person"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "repo@example.invalid"], check=True)
+
+    assert git_author(str(repo)) == ("Repository Person", "repo@example.invalid")
+
+
+def test_db_schema_migration_is_versioned_and_backed_up(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "migration.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "app-data")
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("ALTER TABLE tasks DROP COLUMN base_sha")
+        con.execute("PRAGMA user_version=0")
+
+    db.init_db()
+
+    with db.connect() as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert "base_sha" in {row[1] for row in con.execute("PRAGMA table_info(tasks)")}
+    backups = list((tmp_path / "backups").glob("pre-migration-v0-*.sqlite3"))
+    assert len(backups) == 1
+    with __import__("sqlite3").connect(backups[0]) as con:
+        assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert "base_sha" not in {row[1] for row in con.execute("PRAGMA table_info(tasks)")}
+
+
+def test_packaged_data_directory_is_outside_application_bundle(tmp_path, monkeypatch):
+    from pathlib import Path
+    from app import settings as settings_module
+
+    monkeypatch.delenv("CLINIC_ORCHESTRATOR_DATA_DIR", raising=False)
+    monkeypatch.setattr(settings_module.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(settings_module.sys, "platform", "darwin")
+
+    data_dir = settings_module.default_data_dir()
+
+    assert data_dir == Path.home() / "Library" / "Application Support" / "DevAgent Orchestrator"
+    assert not data_dir.is_relative_to(settings_module.ROOT)
+
+
+def test_repository_validation_profiles_require_reviewable_argv_for_non_maven():
+    from pydantic import ValidationError
+    from app.models import RepositoryCreate
+
+    with pytest.raises(ValidationError):
+        RepositoryCreate(name="Python", path="/tmp/project", validation_profile="python")
+    configured = RepositoryCreate(name="Python", path="/tmp/project", validation_profile="python",
+                                 validation_command=["python3", "-m", "pytest"])
+    assert configured.validation_command == ["python3", "-m", "pytest"]
+
+
 def test_restart_reconciliation_marks_running_and_publishing_tasks_for_manual_review(tmp_path, monkeypatch):
     from app.main import reconcile_interrupted_tasks
 
@@ -265,7 +360,7 @@ def test_validation_engine_blocks_unsupported_project_instead_of_running_maven(t
     result = asyncio.run(ValidationEngine().validate(str(tmp_path), lambda *_: None))
     assert result["blocked"] is True
     assert result["profile"] == "unsupported"
-    assert "Auto mode supports Maven" in result["summary"]
+    assert "root pom.xml" in result["summary"]
 
 
 def test_docs_folder_does_not_skip_code_validation(tmp_path):
@@ -677,7 +772,7 @@ def test_prune_worktrees_preserves_active_tasks_and_removes_old(tmp_path, monkey
     from app.worktrees import prune_worktrees
 
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "prune-test.sqlite3")
-    monkeypatch.setattr(db, "ROOT", str(tmp_path))
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
     db.init_db()
 
     repo_dir = tmp_path / "repo"
@@ -731,7 +826,7 @@ def test_prune_worktrees_preserves_unmerged_source_and_untracked_build_files(tmp
     from app.worktrees import prune_worktrees
 
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "target-test.sqlite3")
-    monkeypatch.setattr(db, "ROOT", str(tmp_path))
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
     db.init_db()
 
     repo_dir = tmp_path / "repo2"

@@ -72,7 +72,7 @@ def prune_worktrees(max_age_hours: float = 24.0, dry_run: bool = False,
         wt_path = Path(wt_str)
         if not wt_path.exists():
             continue
-        managed_root = (Path(db.ROOT) / "data" / "worktrees").resolve()
+        managed_root = (db.DATA_ROOT / "worktrees").resolve()
         try:
             resolved_worktree = wt_path.resolve(strict=True)
             relative_worktree = resolved_worktree.relative_to(managed_root)
@@ -150,7 +150,7 @@ def prune_worktrees(max_age_hours: float = 24.0, dry_run: bool = False,
             run(["git", "worktree", "prune"], cwd=repo_path)
 
     # Count remaining physical worktrees
-    base_wt_root = Path(db.ROOT) / "data" / "worktrees"
+    base_wt_root = db.DATA_ROOT / "worktrees"
     remaining = 0
     if base_wt_root.exists():
         for repo_dir in base_wt_root.iterdir():

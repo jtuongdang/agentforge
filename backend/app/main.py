@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import stat
 import time
 import uuid
@@ -20,11 +21,13 @@ from fastapi.staticfiles import StaticFiles
 from . import db
 from .engine import get_task, log_event, set_task
 from .git_ops import (check_repository_sync, is_github_remote, list_repository_branches,
-                      register_repository, repository, validate_repository_base,
+                      git_author, register_repository, repository, run, validate_repository_base,
                       validated_revision_is_current)
-from .models import AgentCreate, CompleteHandoff, ContractCreate, RepositoryCreate, TaskCreate
+from .models import (AgentCreate, CompleteHandoff, ContractCreate, RepositoryCreate,
+                     RepositoryPreflight, TaskCreate)
 from .contracts import ContractManager
 from .orchestrator import Orchestrator
+from .settings import settings
 from .storage import prune_events, storage_snapshot
 
 orchestrator = Orchestrator()
@@ -36,14 +39,13 @@ pr_manager = orchestrator.github
 reporting = orchestrator.reporting
 execution_engine = orchestrator.execution
 scheduler = orchestrator.scheduler
-ALLOWED_ORIGINS = {"http://127.0.0.1:5173", "http://localhost:5173", "tauri://localhost",
+ALLOWED_ORIGINS = {"http://127.0.0.1:5173", "http://localhost:5173", "http://[::1]:5173", "tauri://localhost",
                    "http://tauri.localhost", "https://tauri.localhost"}
 _ws_tickets: dict[str, float] = {}
 
 
 def _api_token_path() -> Path:
-    configured = os.getenv("CLINIC_ORCHESTRATOR_API_TOKEN_FILE")
-    return Path(configured).expanduser() if configured else db.DB_PATH.parent / "api-token"
+    return settings.api_token_file
 
 
 def _local_api_token() -> str:
@@ -71,8 +73,14 @@ def _local_api_token() -> str:
 
 
 def _host_is_loopback(host: str) -> bool:
-    hostname = host.rsplit(":", 1)[0].strip("[]").lower()
-    return hostname in {"127.0.0.1", "localhost", "[::1]", "::1", "testserver"}
+    value = host.strip().lower()
+    if value.startswith("[") and "]" in value:
+        hostname = value[1:value.index("]")]
+    elif value.count(":") > 1:
+        hostname = value
+    else:
+        hostname = value.split(":", 1)[0]
+    return hostname in {"127.0.0.1", "localhost", "::1", "testserver"}
 
 
 def bootstrap() -> None:
@@ -198,6 +206,66 @@ def storage():
         return storage_snapshot()
     except Exception as exc:
         raise HTTPException(500, f"Could not read local storage metrics: {type(exc).__name__}") from exc
+
+
+@app.get("/api/setup/status")
+def setup_status():
+    with db.connect() as con:
+        repositories = con.execute("SELECT COUNT(*) FROM repositories WHERE enabled=1").fetchone()[0]
+    return {"needs_onboarding": repositories == 0, "registered_repositories": repositories,
+            "data_directory": str(db.DATA_ROOT), "database_path": str(db.DB_PATH),
+            "api_host": settings.api_host, "api_port": settings.api_port}
+
+
+@app.post("/api/repositories/preflight")
+def repository_preflight(body: RepositoryPreflight):
+    path = Path(body.path).expanduser()
+    if not path.is_dir():
+        raise HTTPException(422, "Selected path is not an existing directory")
+    root = path.resolve()
+    top = run(["git", "rev-parse", "--show-toplevel"], root)
+    if top.returncode != 0:
+        raise HTTPException(422, "Selected directory is not inside a Git repository")
+    repository_root = Path(top.stdout.strip()).resolve()
+    branch_validation = None
+    try:
+        branch_validation = validate_repository_base(
+            {"path": str(repository_root), "default_branch": body.default_branch}, body.default_branch)
+        branch_error = None
+    except ValueError as exc:
+        branch_error = str(exc)
+    dirty = bool(run(["git", "status", "--porcelain"], repository_root).stdout.strip())
+    profile = body.validation_profile
+    if profile == "auto":
+        profile = "maven" if (repository_root / "pom.xml").is_file() else "unsupported"
+    executable = None
+    executable_available = None
+    if body.validation_command:
+        command_head = body.validation_command[0]
+        executable = shutil.which(command_head)
+        if executable is None and (Path(command_head).is_absolute() or "/" in command_head):
+            candidate = (repository_root / command_head).resolve()
+            executable = str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else None
+        executable_available = executable is not None
+    elif profile in {"maven", "auto"}:
+        executable = shutil.which("mvn") or (str(repository_root / "mvnw") if (repository_root / "mvnw").is_file() else None)
+        executable_available = executable is not None
+    disk = shutil.disk_usage(db.DATA_ROOT if db.DATA_ROOT.exists() else repository_root)
+    author_name, author_email = git_author(str(repository_root))
+    detected_agents = [{"name": agent["name"], "adapter": agent["adapter"], "available": agent["available"],
+                        "availability_note": agent["availability_note"]} for agent in registry.list()]
+    return {"repository_root": str(repository_root), "default_branch": body.default_branch,
+            "base_sha": branch_validation, "base_error": branch_error, "working_tree_dirty": dirty,
+            "dirty_base_note": "Task worktrees use committed base only; uncommitted source-checkout changes are not copied." if dirty else None,
+            "git_author": {"name": author_name, "email": author_email},
+            "validation_profile": profile, "validation_command": body.validation_command,
+            "validator_executable": executable, "validator_available": executable_available,
+            "agent_tools": detected_agents,
+            "free_disk_bytes": disk.free,
+            "warnings": (["The selected base branch is unavailable; fetch or choose an existing branch."] if branch_error else [])
+                        + (["No automatic validator is configured for this repository."] if profile == "unsupported" else [])
+                        + (["Configured validator executable was not found."] if executable_available is False else [])
+                        + (["No supported Agent CLI or handoff target has been detected yet."] if not detected_agents else [])}
 
 
 @app.post("/api/storage/cleanup")
@@ -423,7 +491,7 @@ def task_diff_preview(task_id: str):
     if not task.get("worktree") or not commit:
         raise HTTPException(409, "Task has no validated commit to review")
     worktree = Path(task["worktree"]).resolve()
-    allowed_root = (Path(db.ROOT) / "data" / "worktrees").resolve()
+    allowed_root = (db.DATA_ROOT / "worktrees").resolve()
     if not worktree.is_relative_to(allowed_root):
         raise HTTPException(409, "Task worktree is outside the Orchestrator worktree area")
     if not worktree.is_dir():
@@ -467,7 +535,7 @@ def handoff_file(task_id: str):
     task = task_row(task_id)
     if task["status"] not in {"handoff_ready", "handoff_complete"}:
         raise HTTPException(409, "Task is not ready for IDE handoff")
-    file = Path(db.ROOT) / "data" / "handoffs" / f"{task_id}.md"
+    file = db.DATA_ROOT / "handoffs" / f"{task_id}.md"
     if not file.exists():
         raise HTTPException(404, "Handoff package was not generated")
     return file.read_text(encoding="utf-8")

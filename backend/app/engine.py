@@ -86,7 +86,7 @@ class AgentExecutionEngine:
         try:
             branch, worktree = await asyncio.to_thread(
                 self.worktrees.prepare, repo, task_id, task.get("base_sha") or task["base_branch"], task["title"])
-            task_file = Path(db.ROOT) / "data" / "handoffs" / f"{task_id}.md"
+            task_file = db.DATA_ROOT / "handoffs" / f"{task_id}.md"
             task_file.parent.mkdir(parents=True, exist_ok=True)
             task_content = self._task_markdown(task, plan, branch, worktree)
             task_file.write_text(task_content, encoding="utf-8")

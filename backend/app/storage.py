@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from . import db
 
 
-DATA_ROOT = Path(db.ROOT) / "data"
+DATA_ROOT = db.DATA_ROOT
 ACTIVE_STATUSES = ("planning", "assigned", "running", "validating", "recovering", "publishing")
 
 
