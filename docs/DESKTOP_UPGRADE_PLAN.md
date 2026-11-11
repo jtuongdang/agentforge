@@ -203,6 +203,8 @@ Mỗi phase cần có: (a) API/schema/UX decision đã duyệt, (b) thay đổi 
 
 **Tiến độ thực thi (11/11/2026):** Phase 0 đã hoàn tất và push commit `8ea7d57` lên `codex/desktop-upgrade`. Changeset/diff dùng base SHA; cleanup preview và chỉ xóa worktree sạch đã tích hợp; docs-only policy không bỏ validator bắt buộc; API local có token, WebSocket dùng ticket một lần; process-group cancellation; dependency cùng repo và commit đã vào base; revision được kiểm tra trước review/publish/complete. Tại cổng G0: **45 passed**; dashboard production build pass; lint exit 0 với 6 warning React; `git diff --check` sạch.
 
+**Kiểm định CI đa môi trường (12/11/2026):** Ubuntu CI run `43106581095` trên `a31873c` có dashboard và desktop-config pass; backend test có 2 failure vì fixture giả định Antigravity.app có sẵn và `dashboard/dist` được build trong job riêng. Hai test đã được làm xác định theo trạng thái app/mount fixture. Toàn bộ backend suite trên máy hiện tại **96 passed** ở `nice -n 10`; cần rerun CI sau commit sửa fixture.
+
 ### Phase 1 — Cấu hình và onboarding backend
 
 **Công việc:** `Settings` thống nhất; versioned migrations + backup trước migration; empty-state/`needs_onboarding`; preflight kiểm tra Git, repo, base, disk, CLI và validator theo stack; đọc Git identity theo repo trước global và cho cấu hình fallback. Maven/Node/Python/Go dùng profile và argv được xem trước, không tự chạy script repo chỉ để “quét môi trường”.
