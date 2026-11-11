@@ -22,6 +22,7 @@ from starlette.background import BackgroundTask
 
 from . import db
 from . import portability
+from . import providers
 from . import tech_lead
 from .engine import get_task, log_event, set_task
 from . import fleet as fleet_manager
@@ -30,6 +31,7 @@ from .git_ops import (changed_paths, check_repository_sync, is_github_remote, li
                       validated_revision_is_current)
 from .models import (AgentCreate, CompleteHandoff, ContractCreate, FleetSettingsUpdate, LeadHandshake,
                      LeadPairingCreate, LeadReview, ProjectCheckpointCreate, ProjectCheckpointRestore,
+                     ProviderConnectionCreate, ProviderConnectionUpdate,
                      RepositoryCreate, RepositoryPreflight, TaskCreate)
 from .contracts import ContractManager
 from .orchestrator import Orchestrator
@@ -569,6 +571,55 @@ def prune_event_log(dry_run: bool = False):
 @app.get("/api/agents")
 def agents():
     return registry.list()
+
+
+@app.get("/api/providers")
+def provider_connections():
+    return providers.list_connections()
+
+
+@app.post("/api/providers", status_code=201)
+def create_provider_connection(body: ProviderConnectionCreate):
+    api_key = body.api_key.get_secret_value() if body.api_key else None
+    try:
+        return providers.create_connection(body.provider, body.name, body.model, api_key, body.endpoint)
+    except providers.ProviderError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.patch("/api/providers/{connection_id}")
+def update_provider_connection(connection_id: str, body: ProviderConnectionUpdate):
+    api_key = body.api_key.get_secret_value() if body.api_key else None
+    try:
+        connection = providers.update_connection(connection_id, name=body.name, model=body.model, api_key=api_key)
+    except providers.ProviderError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if connection is None:
+        raise HTTPException(404, "Provider connection not found")
+    return connection
+
+
+@app.post("/api/providers/{connection_id}/check")
+def check_provider_connection(connection_id: str):
+    try:
+        connection = providers.check_connection(connection_id)
+    except providers.ProviderError as exc:
+        if str(exc) == "Provider connection not found":
+            raise HTTPException(404, str(exc)) from exc
+        raise HTTPException(422, str(exc)) from exc
+    db.event(None, "provider_connection_checked", f"Checked {connection['provider']} provider connection.",
+             {"provider": connection["provider"], "state": connection["state"], "model_count": len(connection["models"])})
+    return connection
+
+
+@app.delete("/api/providers/{connection_id}", status_code=204)
+def delete_provider_connection(connection_id: str):
+    try:
+        if not providers.delete_connection(connection_id):
+            raise HTTPException(404, "Provider connection not found")
+    except providers.ProviderError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return None
 
 
 @app.post("/api/agents/refresh")

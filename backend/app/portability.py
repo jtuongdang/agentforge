@@ -285,6 +285,8 @@ def _scrub_snapshot_database(path: Path) -> None:
                         (f"portable://{row[0]}", _redact_remote(row[1]), row[0]))
         con.execute("UPDATE agents SET command='[]',enabled=0,available=0")
         con.execute("UPDATE agents SET availability_note='Reconfigure the executable and credentials after restore.'")
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_connections'").fetchone():
+            con.execute("UPDATE provider_connections SET secret_ref=NULL,state='unavailable',models='[]',checked_at=NULL")
         con.execute("DELETE FROM system_settings WHERE key NOT LIKE 'fleet.%'")
         con.execute("DELETE FROM credential_cooldowns")
         con.execute("DELETE FROM lead_lease")
@@ -830,6 +832,8 @@ def restore_checkpoint(path: Path, destination: Path) -> dict:
             con.execute("UPDATE lead_sessions SET state='revoked',revoked_at=COALESCE(revoked_at,CURRENT_TIMESTAMP)")
             con.execute("UPDATE agents SET command='[]',enabled=0,available=0,"
                         "availability_note='Reconfigure the executable and credentials after restore.'")
+            if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_connections'").fetchone():
+                con.execute("UPDATE provider_connections SET secret_ref=NULL,state='unavailable',models='[]',checked_at=NULL")
             for repo_id, repo_path in restored_repositories.items():
                 con.execute("UPDATE repositories SET path=?,enabled=1,validation_command='[]' WHERE id=?",
                             (str((destination / repo_path.relative_to(stage)).resolve()), repo_id))

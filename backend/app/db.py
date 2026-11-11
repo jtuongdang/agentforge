@@ -60,7 +60,7 @@ def backup_before_migration() -> Path | None:
     with sqlite3.connect(DB_PATH, timeout=20) as source:
         version = source.execute("PRAGMA user_version").fetchone()[0]
         tables = source.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
-        if version >= 5 or tables == 0:
+        if version >= 6 or tables == 0:
             return None
         backup_dir = DB_PATH.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -143,6 +143,13 @@ def init_db() -> None:
             credential_key TEXT PRIMARY KEY, adapter TEXT NOT NULL, executable TEXT NOT NULL,
             reason TEXT NOT NULL, expires_at TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS provider_connections (
+            id TEXT PRIMARY KEY, provider TEXT NOT NULL CHECK(provider IN ('openai','anthropic','gemini','ollama')),
+            name TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', endpoint TEXT NOT NULL DEFAULT '',
+            secret_ref TEXT, state TEXT NOT NULL DEFAULT 'unverified' CHECK(state IN ('unverified','valid','invalid','unavailable')),
+            models TEXT NOT NULL DEFAULT '[]', checked_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, created_at);
         CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
         """)
@@ -175,7 +182,7 @@ def init_db() -> None:
         for name, declaration in migrations.items():
             if name not in columns:
                 con.execute(f"ALTER TABLE agents ADD COLUMN {name} {declaration}")
-        con.execute("PRAGMA user_version=5")
+        con.execute("PRAGMA user_version=6")
 
 
 def event(task_id: str | None, kind: str, message: str, details: Any = None, agent_id: str | None = None) -> None:

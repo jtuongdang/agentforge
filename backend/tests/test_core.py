@@ -399,7 +399,7 @@ def test_db_schema_migration_is_versioned_and_backed_up(tmp_path, monkeypatch):
     db.init_db()
 
     with db.connect() as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 6
         assert "base_sha" in {row[1] for row in con.execute("PRAGMA table_info(tasks)")}
     backups = list((tmp_path / "backups").glob("pre-migration-v0-*.sqlite3"))
     assert len(backups) == 1
@@ -434,6 +434,176 @@ def test_writer_lease_migration_backs_up_version_three_database(tmp_path, monkey
                             "AND name='task_writer_leases'").fetchone()[0] == 1
         assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
                             "AND name='credential_cooldowns'").fetchone()[0] == 1
+
+
+def test_provider_api_key_stays_in_keyring_and_model_check_is_bounded(tmp_path, monkeypatch):
+    from app import providers
+
+    class FakeKeyring:
+        def __init__(self):
+            self.values = {}
+
+        def set_password(self, service, username, password):
+            self.values[(service, username)] = password
+
+        def get_password(self, service, username):
+            return self.values.get((service, username))
+
+        def delete_password(self, service, username):
+            self.values.pop((service, username), None)
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self, _limit):
+            return b'{"data":[{"id":"gpt-fixture"}]}'
+
+    class FakeOpener:
+        def open(self, request, timeout):
+            assert timeout == providers.TIMEOUT_SECONDS
+            assert request.full_url == providers.PROVIDERS["openai"]["url"]
+            assert request.get_header("Authorization") == "Bearer sk-fixture-secret"
+            return FakeResponse()
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    keyring = FakeKeyring()
+    monkeypatch.setattr(providers, "_keyring", lambda: keyring)
+    monkeypatch.setattr(providers.urllib.request, "build_opener", lambda *_: FakeOpener())
+
+    connection = providers.create_connection("openai", "Fixture OpenAI", api_key="sk-fixture-secret")
+    assert connection["has_credential"] is True
+    assert "secret_ref" not in connection
+    assert "api_key" not in connection
+    checked = providers.check_connection(connection["id"])
+    assert checked["state"] == "valid"
+    assert checked["models"] == ["gpt-fixture"]
+    with db.connect() as con:
+        stored = con.execute("SELECT * FROM provider_connections WHERE id=?", (connection["id"],)).fetchone()
+    assert "sk-fixture-secret" not in repr(dict(stored))
+    assert keyring.get_password(providers.SERVICE_NAME, stored["secret_ref"]) == "sk-fixture-secret"
+
+
+def test_provider_catalog_adapters_use_provider_specific_auth_and_models(tmp_path, monkeypatch):
+    from app import providers
+
+    class FakeKeyring:
+        values = {}
+        def set_password(self, service, username, password): self.values[(service, username)] = password
+        def get_password(self, service, username): return self.values.get((service, username))
+        def delete_password(self, service, username): self.values.pop((service, username), None)
+
+    fixtures = {
+        "openai": (b'{"data":[{"id":"gpt-test"}]}', "gpt-test"),
+        "anthropic": (b'{"data":[{"id":"claude-test"}]}', "claude-test"),
+        "gemini": (b'{"models":[{"name":"models/gemini-test","supportedGenerationMethods":["generateContent"]}]}', "gemini-test"),
+        "ollama": (b'{"models":[{"name":"llama-test"}]}', "llama-test"),
+    }
+
+    class FakeResponse:
+        def __init__(self, raw): self.raw = raw
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def read(self, limit):
+            assert limit == providers.MAX_RESPONSE_BYTES + 1
+            return self.raw
+
+    class FakeOpener:
+        def open(self, request, timeout):
+            assert timeout == providers.TIMEOUT_SECONDS
+            headers = {key.lower(): value for key, value in request.header_items()}
+            if "/api/tags" in request.full_url:
+                assert request.full_url == "http://127.0.0.1:11434/api/tags"
+                assert "authorization" not in headers
+                return FakeResponse(fixtures["ollama"][0])
+            provider = next(key for key, value in providers.PROVIDERS.items() if request.full_url == value["url"])
+            assert headers.get("accept") == "application/json"
+            if provider == "openai": assert headers["authorization"] == "Bearer fixture-key"
+            if provider == "anthropic":
+                assert headers["x-api-key"] == "fixture-key"
+                assert headers["anthropic-version"] == "2023-06-01"
+            if provider == "gemini":
+                assert headers["x-goog-api-key"] == "fixture-key"
+                assert "fixture-key" not in request.full_url
+            return FakeResponse(fixtures[provider][0])
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-catalog.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    monkeypatch.setattr(providers, "_keyring", lambda: FakeKeyring())
+    monkeypatch.setattr(providers.urllib.request, "build_opener", lambda *_: FakeOpener())
+
+    for provider in ("openai", "anthropic", "gemini"):
+        connection = providers.create_connection(provider, provider, api_key="fixture-key")
+        checked = providers.check_connection(connection["id"])
+        assert checked["state"] == "valid"
+        assert checked["models"] == [fixtures[provider][1]]
+    ollama = providers.create_connection("ollama", "Local Ollama")
+    checked = providers.check_connection(ollama["id"])
+    assert checked["models"] == [fixtures["ollama"][1]]
+
+
+def test_provider_api_requires_local_token_and_never_returns_secret(tmp_path, monkeypatch):
+    from app import providers
+
+    class FakeKeyring:
+        values = {}
+        def set_password(self, service, username, password): self.values[(service, username)] = password
+        def get_password(self, service, username): return self.values.get((service, username))
+        def delete_password(self, service, username): self.values.pop((service, username), None)
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-api.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    monkeypatch.setattr(providers, "_keyring", lambda: FakeKeyring())
+    db.init_db()
+    with authenticated_test_client(monkeypatch) as client:
+        unauthenticated = client.get("/api/providers", headers={"Authorization": ""})
+        assert unauthenticated.status_code == 401
+        response = client.post("/api/providers", json={"provider":"openai", "name":"Fixture", "api_key":"sk-never-return-this"})
+        assert response.status_code == 201
+        assert "sk-never-return-this" not in response.text
+        assert response.json()["has_credential"] is True
+        listed = client.get("/api/providers")
+        assert listed.status_code == 200
+        assert "sk-never-return-this" not in listed.text
+
+
+def test_ollama_provider_rejects_non_loopback_endpoint():
+    from app.providers import ProviderError, create_connection
+
+    with pytest.raises(ProviderError, match="local loopback"):
+        create_connection("ollama", "Untrusted Ollama", endpoint="http://192.168.1.20:11434")
+
+
+def test_provider_schema_upgrade_snapshots_version_five_database(tmp_path, monkeypatch):
+    import sqlite3
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "migration-v5.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "app-data")
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('keep','keep',?)", (str(tmp_path),))
+        con.execute("DROP TABLE provider_connections")
+        con.execute("PRAGMA user_version=5")
+
+    db.init_db()
+
+    backups = list((tmp_path / "backups").glob("pre-migration-v5-*.sqlite3"))
+    assert len(backups) == 1
+    with sqlite3.connect(backups[0]) as con:
+        assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert con.execute("SELECT id FROM repositories WHERE id='keep'").fetchone()[0] == "keep"
+        assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                           "AND name='provider_connections'").fetchone()[0] == 0
+    with db.connect() as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                           "AND name='provider_connections'").fetchone()[0] == 1
 
 
 def test_packaged_data_directory_is_outside_application_bundle(tmp_path, monkeypatch):
@@ -1681,6 +1851,8 @@ def _portable_checkpoint_fixture(tmp_path, monkeypatch):
                     ("agent-a", "CLI", "exec", json.dumps(["agent", "ghp_" + "B" * 36])))
         con.execute("INSERT INTO system_settings(key,value) VALUES('provider.api_token',?)", ("ghp_" + "C" * 36,))
         con.execute("INSERT INTO system_settings(key,value) VALUES('fleet.max_active_runs','2')")
+        con.execute("INSERT INTO provider_connections(id,provider,name,model,secret_ref,state,models) "
+                    "VALUES('provider-a','openai','Fixture','model-a','source-keyring-ref','valid','[\"model-a\"]')")
     return repo
 
 
@@ -1719,6 +1891,8 @@ def test_checkpoint_export_redacts_credentials_paths_and_disabled_agents(tmp_pat
         assert con.execute("SELECT command,enabled,available FROM agents WHERE id='agent-a'").fetchone() == ("[]", 0, 0)
         assert con.execute("SELECT value FROM system_settings WHERE key='fleet.max_active_runs'").fetchone() == ("2",)
         assert con.execute("SELECT COUNT(*) FROM system_settings WHERE key='provider.api_token'").fetchone()[0] == 0
+        assert con.execute("SELECT secret_ref,state,models,checked_at FROM provider_connections WHERE id='provider-a'").fetchone() == (
+            None, "unavailable", "[]", None)
 
 
 def test_checkpoint_includes_explicit_safe_uncommitted_files_and_rejects_secrets(tmp_path, monkeypatch):

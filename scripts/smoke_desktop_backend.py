@@ -50,11 +50,11 @@ def read_json(url: str, headers: dict[str, str] | None = None) -> dict:
         return json.loads(response.read())
 
 
-def post_json(url: str, payload: dict, headers: dict[str, str]) -> dict:
+def post_json(url: str, payload: dict, headers: dict[str, str], expected_status: int = 200) -> dict:
     request = Request(url, data=json.dumps(payload).encode("utf-8"), headers={
         **headers, "Content-Type": "application/json"}, method="POST")
     with urlopen(request, timeout=30) as response:
-        if response.status != 200:
+        if response.status != expected_status:
             raise RuntimeError(f"Local API returned HTTP {response.status}")
         return json.loads(response.read())
 
@@ -141,9 +141,17 @@ def main() -> int:
             with closing(sqlite3.connect(database)) as con:
                 version = con.execute("PRAGMA user_version").fetchone()[0]
                 integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
-            if version < 5 or integrity != "ok":
+            if version < 6 or integrity != "ok":
                 raise RuntimeError(f"Packaged database failed checks: schema={version}, integrity={integrity}")
             headers = {"Authorization": f"Bearer {token}"}
+            provider = post_json(base + "/api/providers", {
+                "provider": "ollama", "name": "Packaged local fixture"}, headers, expected_status=201)
+            if provider.get("has_credential") or "secret_ref" in provider or "api_key" in provider:
+                raise RuntimeError("Provider API returned credential material in its metadata")
+            provider_url = base + "/api/providers/" + provider["id"]
+            with urlopen(Request(provider_url, headers=headers, method="DELETE"), timeout=5) as response:
+                if response.status != 204:
+                    raise RuntimeError("Packaged provider connection could not be removed")
             checkpoint = post_json(base + "/api/storage/checkpoints", {"include_uncommitted": False}, headers)
             checkpoint_path = temp / "data" / "checkpoints" / checkpoint["filename"]
             if not checkpoint_path.is_file():
@@ -159,7 +167,7 @@ def main() -> int:
                 restored_integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
             if restored_integrity != "ok" or restored["repository_count"] != 0:
                 raise RuntimeError("Packaged restored profile failed database or repository checks")
-            print(f"Packaged sidecar smoke passed: API/token auth, schema={version}, checkpoint export/restore.")
+            print(f"Packaged sidecar smoke passed: API/token auth, schema={version}, provider metadata, checkpoint export/restore.")
             return 0
         except Exception as exc:
             print(f"Packaged sidecar smoke failed: {exc}", file=sys.stderr)

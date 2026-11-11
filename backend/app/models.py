@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 
 class RepositoryCreate(BaseModel):
@@ -57,6 +57,34 @@ class AgentCreate(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     file_globs: list[str] = Field(default_factory=lambda: ["**/*"])
     max_parallel: int = Field(default=1, ge=1, le=8)
+
+
+class ProviderConnectionCreate(BaseModel):
+    provider: str = Field(pattern="^(openai|anthropic|gemini|ollama)$")
+    name: str = Field(min_length=1, max_length=120)
+    model: str = Field(default="", max_length=160)
+    api_key: SecretStr | None = None
+    endpoint: str | None = Field(default=None, max_length=300)
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and (not value.get_secret_value().strip() or len(value.get_secret_value()) > 4096):
+            raise ValueError("API key must contain 1 to 4096 characters")
+        return value
+
+
+class ProviderConnectionUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    model: str | None = Field(default=None, max_length=160)
+    api_key: SecretStr | None = None
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and (not value.get_secret_value().strip() or len(value.get_secret_value()) > 4096):
+            raise ValueError("API key must contain 1 to 4096 characters")
+        return value
 
 
 class ContractCreate(BaseModel):
