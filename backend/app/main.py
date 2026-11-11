@@ -13,17 +13,18 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db
 from .engine import get_task, log_event, set_task
+from . import fleet as fleet_manager
 from .git_ops import (check_repository_sync, is_github_remote, list_repository_branches,
                       git_author, register_repository, repository, run, validate_repository_base,
                       validated_revision_is_current)
-from .models import (AgentCreate, CompleteHandoff, ContractCreate, RepositoryCreate,
+from .models import (AgentCreate, CompleteHandoff, ContractCreate, FleetSettingsUpdate, RepositoryCreate,
                      RepositoryPreflight, TaskCreate)
 from .contracts import ContractManager
 from .orchestrator import Orchestrator
@@ -206,6 +207,39 @@ def storage():
         return storage_snapshot()
     except Exception as exc:
         raise HTTPException(500, f"Could not read local storage metrics: {type(exc).__name__}") from exc
+
+
+@app.get("/api/fleet")
+def fleet_status():
+    config = fleet_manager.settings()
+    active_states = ("planning", "assigned", "running", "validating", "recovering", "publishing")
+    marks = ",".join("?" for _ in active_states)
+    with db.connect() as con:
+        active = [dict(row) for row in con.execute(f"""SELECT t.id AS task_id,t.title,t.status,
+                t.assigned_agent_id,a.name AS agent_name,r.name AS repository_name,
+                (SELECT runs.id FROM runs WHERE runs.task_id=t.id ORDER BY runs.started_at DESC LIMIT 1) AS run_id
+            FROM tasks t LEFT JOIN agents a ON a.id=t.assigned_agent_id
+            LEFT JOIN repositories r ON r.id=t.repository_id WHERE t.status IN ({marks})
+            ORDER BY t.created_at,t.id""", active_states).fetchall()]
+        queued = con.execute("SELECT COUNT(*) FROM tasks WHERE status IN ('queued','waiting_for_scope','waiting_for_contract')").fetchone()[0]
+    free_disk = fleet_manager.disk_free_bytes()
+    reserved = config["min_free_disk_bytes"] + len(active) * config["disk_reserve_per_run_bytes"]
+    return {"settings": config, "active_runs": active, "active_run_count": len(active), "queued_tasks": queued,
+            "draining": len(active) > config["max_active_runs"],
+            "builds_active": orchestrator.build_slots.active,
+            "disk": {"free_bytes": free_disk, "required_reserve_bytes": reserved,
+                     "can_admit_run": free_disk >= reserved + config["disk_reserve_per_run_bytes"]}}
+
+
+@app.patch("/api/fleet")
+def update_fleet(body: FleetSettingsUpdate):
+    try:
+        values = fleet_manager.update_settings(body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    db.event(None, "fleet_settings_updated", "Fleet capacity settings were updated.",
+             {key: values[key] for key, value in body.model_dump().items() if value is not None})
+    return fleet_status()
 
 
 @app.get("/api/setup/status")
@@ -485,7 +519,7 @@ def task_events(task_id: str, after: int = 0):
 
 
 @app.get("/api/tasks/{task_id}/diff")
-def task_diff_preview(task_id: str):
+def task_diff_preview(task_id: str, offset: int = Query(default=0, ge=0), limit: int = Query(default=250_000, ge=1, le=250_000)):
     task = task_row(task_id)
     commit = task.get("validation", {}).get("commit")
     if not task.get("worktree") or not commit:
@@ -499,7 +533,8 @@ def task_diff_preview(task_id: str):
     if not validated_revision_is_current(str(worktree), task.get("validation", {}).get("commit")):
         raise HTTPException(409, "Task worktree changed after validation; rerun review and validation")
     try:
-        return worktrees.diff(str(worktree), str(commit), task.get("base_sha") or task.get("base_branch"))
+        return worktrees.diff(str(worktree), str(commit), task.get("base_sha") or task.get("base_branch"),
+                              max_chars=limit, offset=offset)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from exc
 

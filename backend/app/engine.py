@@ -60,12 +60,14 @@ def log_event(task_id: str | None, kind: str, message: str, details: dict | None
 
 class AgentExecutionEngine:
     def __init__(self, registry: AgentRegistry, worktrees: GitWorktreeManager | None = None,
-                 validation: ValidationEngine | None = None, recovery: RecoveryManager | None = None):
+                 validation: ValidationEngine | None = None, recovery: RecoveryManager | None = None,
+                 build_slots=None):
         self.registry = registry
         self.planner = TaskPlanner()
         self.worktrees = worktrees or GitWorktreeManager()
         self.validation = validation or ValidationEngine()
         self.recovery = recovery or RecoveryManager()
+        self.build_slots = build_slots
 
     async def execute(self, task_id: str, agent: dict) -> None:
         task = get_task(task_id)
@@ -127,10 +129,16 @@ class AgentExecutionEngine:
                         last_error = f"Possible secret content in changed files: {', '.join(secret_files)}"
                         break
                     set_task(task_id, "validating")
-                    validation = await self.validation.validate(
-                        worktree, lambda kind, msg: log_event(task_id, kind, msg, agent_id=agent["id"]),
-                        repo.get("validation_profile", "auto"), repo.get("validation_command", []),
-                        paths=paths)
+                    if self.build_slots:
+                        await self.build_slots.acquire()
+                    try:
+                        validation = await self.validation.validate(
+                            worktree, lambda kind, msg: log_event(task_id, kind, msg, agent_id=agent["id"]),
+                            repo.get("validation_profile", "auto"), repo.get("validation_command", []),
+                            paths=paths)
+                    finally:
+                        if self.build_slots:
+                            self.build_slots.release()
                     if validation["passed"]:
                         sha = await asyncio.to_thread(self.worktrees.commit, worktree, paths, task_id, task["title"],
                                                       task.get("base_sha") or task.get("base_branch"))

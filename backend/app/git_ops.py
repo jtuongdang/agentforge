@@ -166,7 +166,7 @@ def changed_paths(worktree: str, base_branch: str | None = None) -> list[str]:
 
 
 def task_diff(worktree: str, commit: str, max_chars: int = 250_000,
-              base_branch: str | None = None) -> dict:
+              base_branch: str | None = None, offset: int = 0) -> dict:
     if not re.fullmatch(r"[0-9a-f]{40,64}", commit):
         raise ValueError("Task commit reference is invalid")
     args = ["git", "diff", "--no-ext-diff", "--no-color", "--unified=40"]
@@ -178,7 +178,10 @@ def task_diff(worktree: str, commit: str, max_chars: int = 250_000,
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "Could not read task diff").strip()[-1000:])
     value = result.stdout
-    return {"diff": value[:max_chars], "truncated": len(value) > max_chars}
+    offset = max(0, min(offset, len(value)))
+    end = min(len(value), offset + max_chars)
+    return {"diff": value[offset:end], "truncated": end < len(value), "offset": offset,
+            "next_offset": end if end < len(value) else None, "total_chars": len(value)}
 
 
 def validated_revision_is_current(worktree: str, validated_head: str | None) -> bool:

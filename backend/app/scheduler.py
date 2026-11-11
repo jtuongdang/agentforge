@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from . import db
 from .engine import AgentExecutionEngine, get_task, log_event, redact, set_task
+from .fleet import credential_key, disk_free_bytes, settings as fleet_settings
 from .git_ops import repository, run
 from .validation import scopes_may_overlap
 
@@ -34,7 +35,7 @@ class TaskScheduler:
                         if candidate["id"] in self.active:
                             continue
                         agent = self._choose_agent(candidate)
-                        if agent and self._claim_task(candidate["id"]):
+                        if agent and self._claim_task(candidate["id"], agent):
                             job = asyncio.create_task(self.execution.execute(candidate["id"], agent))
                             self.active[candidate["id"]] = job
                             self.active_scopes[candidate["id"]] = (
@@ -77,11 +78,31 @@ class TaskScheduler:
             log_event(task_id, "failed", f"Unhandled scheduler error: {error}", agent_id=agent_id)
 
     @staticmethod
-    def _claim_task(task_id: str) -> bool:
-        """Atomically reserve a queued task across scheduler processes sharing SQLite."""
+    def _claim_task(task_id: str, agent: dict | None = None) -> bool:
+        """Atomically reserve global run, disk and credential budget across schedulers."""
+        free_disk = disk_free_bytes()
+        active_states = ("planning", "assigned", "running", "validating", "recovering", "publishing")
+        marks = ",".join("?" for _ in active_states)
         with db.transaction() as con:
-            result = con.execute("""UPDATE tasks SET status='planning',updated_at=CURRENT_TIMESTAMP
-                WHERE id=? AND status IN ('queued','waiting_for_scope')""", (task_id,))
+            con.execute("BEGIN IMMEDIATE")
+            config = fleet_settings(con)
+            active = con.execute(f"SELECT COUNT(*) FROM tasks WHERE status IN ({marks})", active_states).fetchone()[0]
+            if active >= config["max_active_runs"]:
+                return False
+            required_free = config["min_free_disk_bytes"] + (active + 1) * config["disk_reserve_per_run_bytes"]
+            if free_disk < required_free:
+                return False
+            if agent and agent.get("adapter") != "handoff":
+                adapter, executable = credential_key(agent)
+                used = con.execute(f"""SELECT COUNT(*) FROM tasks t JOIN agents a ON a.id=t.assigned_agent_id
+                    WHERE t.status IN ({marks}) AND a.adapter=? AND
+                    COALESCE(json_extract(a.command,'$[0]'),a.adapter)=?""",
+                    (*active_states, adapter, executable)).fetchone()[0]
+                if used >= config["max_per_credential"]:
+                    return False
+            result = con.execute("""UPDATE tasks SET status='planning',assigned_agent_id=COALESCE(?,assigned_agent_id),
+                updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('queued','waiting_for_scope')""",
+                (agent["id"] if agent else None, task_id))
         return result.rowcount == 1
 
     def _queued_tasks(self) -> list[dict]:

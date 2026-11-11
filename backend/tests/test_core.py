@@ -48,6 +48,34 @@ def test_websocket_rejects_missing_or_unissued_ticket():
         assert closed.value.code == 4401
 
 
+def test_websocket_reconnect_replays_events_from_last_cursor(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "ws-cursor.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('r','fixture',?)", (str(tmp_path),))
+        con.execute("""INSERT INTO tasks(id,title,objective,repository_id,file_globs)
+            VALUES('task','fixture task','fixture objective','r','[\"**/*\"]')""")
+    db.event("task", "first", "First event")
+    db.event("task", "second", "Second event")
+    db.event("task", "third", "Third event")
+    with db.connect() as con:
+        cursor = con.execute("SELECT id FROM events WHERE task_id='task' ORDER BY id").fetchall()[0][0]
+
+    with authenticated_test_client(monkeypatch) as client:
+        ticket = client.get("/api/ws-ticket").json()["ticket"]
+        with client.websocket_connect(f"/ws/tasks/task/events?after={cursor}&ticket={ticket}",
+                                     headers={"Origin": "http://127.0.0.1:5173"}) as socket:
+            second = socket.receive_json()
+        assert second["kind"] == "second"
+
+        ticket = client.get("/api/ws-ticket").json()["ticket"]
+        with client.websocket_connect(f"/ws/tasks/task/events?after={second['id']}&ticket={ticket}",
+                                     headers={"Origin": "http://127.0.0.1:5173"}) as socket:
+            third = socket.receive_json()
+        assert third["kind"] == "third"
+
+
 def test_task_planner_keeps_the_declared_file_boundary():
     plan = TaskPlanner().plan("Small task", "Implement one UI label", ["clinic-desktop/src/**/*.java"], ["java"],
                               ["The label is visible to a user."],
@@ -299,7 +327,7 @@ def test_db_schema_migration_is_versioned_and_backed_up(tmp_path, monkeypatch):
     db.init_db()
 
     with db.connect() as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 2
         assert "base_sha" in {row[1] for row in con.execute("PRAGMA table_info(tasks)")}
     backups = list((tmp_path / "backups").glob("pre-migration-v0-*.sqlite3"))
     assert len(backups) == 1
@@ -444,6 +472,11 @@ def test_task_diff_returns_patch_for_a_specific_commit(tmp_path):
     assert "-before" in preview["diff"]
     assert "+after" in preview["diff"]
     assert preview["truncated"] is False
+    first = task_diff(str(repo), commit, max_chars=10, base_branch="main")
+    second = task_diff(str(repo), commit, max_chars=1000, base_branch="main", offset=first["next_offset"])
+    assert first["truncated"] is True
+    assert first["diff"] + second["diff"] == preview["diff"]
+    assert second["next_offset"] is None
 
 
 def test_changed_paths_includes_all_commits_and_uncommitted_files(tmp_path):
@@ -495,6 +528,7 @@ def test_scheduler_atomically_claims_task_only_once_across_instances(tmp_path, m
     from app.scheduler import TaskScheduler
 
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "claim.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
     db.init_db()
     with db.transaction() as con:
         con.execute("INSERT INTO repositories(id,name,path) VALUES('r','fixture',?)", (str(tmp_path),))
@@ -506,6 +540,143 @@ def test_scheduler_atomically_claims_task_only_once_across_instances(tmp_path, m
     assert TaskScheduler._claim_task("task") is False
     with db.connect() as con:
         assert con.execute("SELECT status FROM tasks WHERE id='task'").fetchone()[0] == "planning"
+
+
+def test_fleet_capacity_persists_and_scheduler_drains_without_cancelling_runs(tmp_path, monkeypatch):
+    from app import fleet
+    from app.main import fleet_status
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "fleet.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    fleet.update_settings({"max_active_runs": 1, "max_parallel_builds": 1, "max_per_credential": 1,
+                           "min_free_disk_bytes": 256 * 1024**2,
+                           "disk_reserve_per_run_bytes": 64 * 1024**2})
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('r','fixture',?)", (str(tmp_path),))
+        for task_id in ("active-a", "active-b"):
+            con.execute("""INSERT INTO tasks(id,title,objective,repository_id,file_globs,status)
+                VALUES(?,?,?,?,?,'running')""", (task_id, task_id, "fixture objective", "r", '["**/*"]'))
+
+    view = fleet_status()
+    assert view["active_run_count"] == 2
+    assert view["draining"] is True
+    assert {run["task_id"] for run in view["active_runs"]} == {"active-a", "active-b"}
+    assert {row[0] for row in _task_statuses()} == {"running"}
+
+    fleet.update_settings({"max_active_runs": 3})
+    db.init_db()
+    assert fleet.settings()["max_active_runs"] == 3
+    assert fleet_status()["draining"] is False
+
+
+def test_fleet_api_reads_and_updates_persistent_capacity(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "fleet-api.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    with authenticated_test_client(monkeypatch) as client:
+        initial = client.get("/api/fleet")
+        assert initial.status_code == 200
+        assert initial.json()["settings"]["max_active_runs"] == 2
+        updated = client.patch("/api/fleet", json={"max_active_runs": 1, "max_parallel_builds": 1})
+        assert updated.status_code == 200
+        assert updated.json()["settings"]["max_active_runs"] == 1
+        assert updated.json()["settings"]["max_parallel_builds"] == 1
+
+
+def _task_statuses():
+    with db.connect() as con:
+        return con.execute("SELECT status FROM tasks").fetchall()
+
+
+def test_scheduler_enforces_global_run_and_shared_credential_caps(tmp_path, monkeypatch):
+    from app import fleet
+    from app.scheduler import TaskScheduler
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "fleet-claim.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    monkeypatch.setattr(fleet, "disk_free_bytes", lambda: 10**12)
+    db.init_db()
+    fleet.update_settings({"max_active_runs": 2, "max_per_credential": 1})
+    command = db.dumps(["/opt/test-agent"])
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('r','fixture',?)", (str(tmp_path),))
+        con.execute("INSERT INTO agents(id,name,adapter,command) VALUES('a1','Agent one','codex',?)", (command,))
+        con.execute("INSERT INTO agents(id,name,adapter,command) VALUES('a2','Agent two','codex',?)", (command,))
+        con.execute("""INSERT INTO tasks(id,title,objective,repository_id,file_globs,status,assigned_agent_id)
+            VALUES('active','active','fixture objective','r','[\"**/*\"]','running','a1')""")
+        con.execute("""INSERT INTO tasks(id,title,objective,repository_id,file_globs)
+            VALUES('queued','queued','fixture objective','r','[\"**/*\"]')""")
+
+    assert TaskScheduler._claim_task("queued", {"id": "a2", "adapter": "codex", "command": ["/opt/test-agent"]}) is False
+    with db.connect() as con:
+        assert con.execute("SELECT status FROM tasks WHERE id='queued'").fetchone()[0] == "queued"
+
+
+def test_parallel_scheduler_claims_never_exceed_global_run_budget(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from app import fleet
+    from app.scheduler import TaskScheduler
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "parallel-claims.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    monkeypatch.setattr("app.scheduler.disk_free_bytes", lambda: 10**12)
+    db.init_db()
+    fleet.update_settings({"max_active_runs": 1})
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('r','fixture',?)", (str(tmp_path),))
+        for index in range(4):
+            con.execute("INSERT INTO tasks(id,title,objective,repository_id,file_globs) VALUES(?,?,?,?,?)",
+                        (f"queued-{index}", "queued", "fixture objective", "r", '[\"**/*\"]'))
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        claims = list(pool.map(TaskScheduler._claim_task, (f"queued-{index}" for index in range(4))))
+    assert sum(claims) == 1
+    with db.connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM tasks WHERE status='planning'").fetchone()[0] == 1
+
+
+def test_scheduler_reserves_disk_before_claiming_new_run(tmp_path, monkeypatch):
+    from app import fleet
+    from app.scheduler import TaskScheduler
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "disk-claim.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    monkeypatch.setattr("app.scheduler.disk_free_bytes", lambda: 300 * 1024**2)
+    db.init_db()
+    fleet.update_settings({"min_free_disk_bytes": 256 * 1024**2, "disk_reserve_per_run_bytes": 64 * 1024**2})
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('r','fixture',?)", (str(tmp_path),))
+        con.execute("INSERT INTO tasks(id,title,objective,repository_id,file_globs) VALUES('queued','queued','fixture objective','r','[\"**/*\"]')")
+
+    assert TaskScheduler._claim_task("queued") is False
+    with db.connect() as con:
+        assert con.execute("SELECT status FROM tasks WHERE id='queued'").fetchone()[0] == "queued"
+
+
+def test_build_slots_hot_apply_capacity_without_releasing_active_build(tmp_path, monkeypatch):
+    import asyncio
+    from app import fleet
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "build-slots.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    fleet.update_settings({"max_parallel_builds": 1})
+    gate = fleet.BuildSlotGate()
+
+    async def exercise():
+        await gate.acquire()
+        waiting = asyncio.create_task(gate.acquire())
+        await asyncio.sleep(0.25)
+        assert not waiting.done()
+        fleet.update_settings({"max_parallel_builds": 2})
+        await asyncio.wait_for(waiting, timeout=1)
+        assert gate.active == 2
+        gate.release()
+        gate.release()
+        assert gate.active == 0
+
+    asyncio.run(exercise())
 
 
 def test_successful_validation_clears_stale_task_error(tmp_path, monkeypatch):

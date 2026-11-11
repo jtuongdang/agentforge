@@ -60,7 +60,7 @@ def backup_before_migration() -> Path | None:
     with sqlite3.connect(DB_PATH, timeout=20) as source:
         version = source.execute("PRAGMA user_version").fetchone()[0]
         tables = source.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
-        if version >= 1 or tables == 0:
+        if version >= 2 or tables == 0:
             return None
         backup_dir = DB_PATH.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -115,6 +115,9 @@ def init_db() -> None:
             kind TEXT NOT NULL, message TEXT NOT NULL, details TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, created_at);
         CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
         """)
@@ -147,7 +150,7 @@ def init_db() -> None:
         for name, declaration in migrations.items():
             if name not in columns:
                 con.execute(f"ALTER TABLE agents ADD COLUMN {name} {declaration}")
-        con.execute("PRAGMA user_version=1")
+        con.execute("PRAGMA user_version=2")
 
 
 def event(task_id: str | None, kind: str, message: str, details: Any = None, agent_id: str | None = None) -> None:

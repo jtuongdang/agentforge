@@ -107,3 +107,11 @@ class TaskCreate(BaseModel):
 class CompleteHandoff(BaseModel):
     report: str = Field(min_length=3, max_length=5000)
 
+
+class FleetSettingsUpdate(BaseModel):
+    max_active_runs: int | None = Field(default=None, ge=1, le=32)
+    max_parallel_builds: int | None = Field(default=None, ge=1, le=16)
+    max_per_credential: int | None = Field(default=None, ge=1, le=16)
+    min_free_disk_bytes: int | None = Field(default=None, ge=256 * 1024**2, le=1024**4)
+    disk_reserve_per_run_bytes: int | None = Field(default=None, ge=64 * 1024**2, le=1024**4)
+

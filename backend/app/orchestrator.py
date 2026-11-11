@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .engine import AgentExecutionEngine
+from .fleet import BuildSlotGate
 from .github_pr import GitHubPullRequestManager
 from .registry import AgentRegistry
 from .reporting import ReportingManager
@@ -16,7 +17,9 @@ class Orchestrator:
         self.registry = AgentRegistry()
         self.worktrees = GitWorktreeManager()
         self.validation = ValidationEngine()
-        self.execution = AgentExecutionEngine(self.registry, self.worktrees, self.validation)
+        self.build_slots = BuildSlotGate()
+        self.execution = AgentExecutionEngine(self.registry, self.worktrees, self.validation,
+                                             build_slots=self.build_slots)
         self.scheduler = TaskScheduler(self.execution)
         self.github = GitHubPullRequestManager()
         self.reporting = ReportingManager()

@@ -184,8 +184,9 @@ class GitWorktreeManager:
     def commit(self, worktree: str, paths: list[str], task_id: str, title: str, base_branch: str | None = None) -> str:
         return commit_changes(worktree, paths, task_id, title, base_branch=base_branch)
 
-    def diff(self, worktree: str, commit: str, base_branch: str | None = None) -> dict:
-        return task_diff(worktree, commit, base_branch=base_branch)
+    def diff(self, worktree: str, commit: str, base_branch: str | None = None,
+             max_chars: int = 250_000, offset: int = 0) -> dict:
+        return task_diff(worktree, commit, max_chars=max_chars, base_branch=base_branch, offset=offset)
 
     def prune_old(self, max_age_hours: float = 24.0, dry_run: bool = False,
                   clean_unmerged_targets_only: bool = True) -> dict:

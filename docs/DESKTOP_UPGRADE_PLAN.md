@@ -237,6 +237,8 @@ Mỗi phase cần có: (a) API/schema/UX decision đã duyệt, (b) thay đổi 
 
 **Thứ tự thực hiện:** lưu cấu hình pool bền vững → slot/run model → global resource budget/lease → endpoint hot apply/drain → reconnect event stream → UI fleet/DAG. UI không được cấp slot vượt capacity backend.
 
+**Tiến độ thực thi (11/11/2026):** Phase 3 đã hoàn tất phạm vi hiện tại. Cấu hình fleet lưu SQLite và hot-apply; scheduler khóa claim bằng `BEGIN IMMEDIATE`, áp giới hạn active run, nhóm CLI credential theo adapter + executable và chặn cấp slot khi không đủ disk reserve. Hạ capacity chuyển sang drain, không hủy run đang hoạt động; validation/build có limiter riêng. `/api/fleet` và trang Fleet hiển thị giới hạn, run owner, trạng thái drain và disk headroom. Task drawer có tab Overview/Activity/Diff, dependency flow và diff tải theo chunk 250 KB; event stream reconnect bằng cursor, khử duplicate và giữ tối đa 1.000 event trong UI. Nghiệm thu: **57 passed** (thêm claim song song, disk gate, persist/drain, build hot-apply, diff pagination và WebSocket reconnect cursor); frontend build pass; lint exit 0 với 5 warning React `set-state-in-effect`; Tauri arm64 `.app` 29.84 MiB + DMG 20.88 MiB build pass; smoke UI xác nhận API kết nối, Fleet và shutdown sạch. RAM không được ước lượng bằng hằng số theo worker. Build limiter áp dụng trong backend instance; Desktop dùng single-instance.
+
 ### Phase 4 — External Tech Lead
 
 **Công việc:** chọn Manual/Codex/CLI khác theo capability; activation prompt sinh từ API contract hiện hành; endpoint handshake riêng với client/session identity; heartbeat, expiry và lease quyền lead; handover snapshot gồm task, contract, revision, pending review và fleet. Lease cũ hết quyền điều khiển khi đổi lead, workers tiếp tục.
