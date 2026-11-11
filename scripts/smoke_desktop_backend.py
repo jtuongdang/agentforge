@@ -12,7 +12,7 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -129,7 +129,7 @@ def main() -> int:
             database = temp / "data" / "orchestrator.sqlite3"
             if not database.is_file():
                 raise RuntimeError("Packaged sidecar did not create its application database")
-            with sqlite3.connect(database) as con:
+            with closing(sqlite3.connect(database)) as con:
                 version = con.execute("PRAGMA user_version").fetchone()[0]
                 integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
             if version < 5 or integrity != "ok":
