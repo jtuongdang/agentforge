@@ -1,0 +1,766 @@
+from __future__ import annotations
+
+import subprocess
+import json
+
+import pytest
+
+from fastapi.testclient import TestClient
+
+from app import db
+from app.main import app, bootstrap
+from app.planner import TaskPlanner
+from app.validation import ValidationEngine, check_scope, check_secrets, in_scope, scopes_may_overlap
+from app.registry import AgentRegistry
+from app.git_ops import task_diff
+
+
+def test_task_planner_keeps_the_declared_file_boundary():
+    plan = TaskPlanner().plan("Small task", "Implement one UI label", ["clinic-desktop/src/**/*.java"], ["java"],
+                              ["The label is visible to a user."],
+                              "## Mandatory project guidance\nUse the documented naming rules.",
+                              ["docs/PROJECT_CONVENTIONS.md"])
+    assert plan.title == "Small task"
+    assert plan.file_globs == ["clinic-desktop/src/**/*.java"]
+    assert "Allowed file globs" in plan.objective
+    assert "synthetic data only" in plan.objective
+    assert "The label is visible to a user." in plan.objective
+    assert "Mandatory project guidance" in plan.objective
+    assert "docs/PROJECT_CONVENTIONS.md" in plan.objective
+    assert "Completion report must list guidance files read." in plan.objective
+
+
+def test_project_guidance_loads_root_and_scoped_agent_instructions(tmp_path):
+    from app.project_guidance import load_project_guidance
+
+    (tmp_path / "AGENTS.md").write_text("Root rules", encoding="utf-8")
+    module = tmp_path / "clinic-domain"
+    module.mkdir()
+    (module / "AGENTS.md").write_text("Domain rules", encoding="utf-8")
+    (tmp_path / "README.md").write_text("Project description", encoding="utf-8")
+
+    guidance, files = load_project_guidance(tmp_path, ["clinic-domain/src/**/*.java"])
+
+    assert "Orchestrator baseline: docs/PROJECT_CONVENTIONS.md" in files
+    assert "AGENTS.md" in files
+    assert "clinic-domain/AGENTS.md" in files
+    assert "README.md" in files
+    assert "Root rules" in guidance
+    assert "Domain rules" in guidance
+    assert "mandatory" in guidance.lower()
+
+
+def test_scope_check_handles_nested_globs_and_blocks_unlisted_paths():
+    assert in_scope("clinic-application/src/main/Handler.java", ["clinic-application/src/**"])
+    assert check_scope(["clinic-application/src/Handler.java", "README.md"], ["clinic-application/src/**"]) == ["README.md"]
+    assert not in_scope("../outside.txt", ["**/*"])
+
+
+def test_parallel_file_scope_check_is_conservative_and_allows_separate_module_roots():
+    assert not scopes_may_overlap(["clinic-domain/src/**"], ["clinic-application/src/**"])
+    assert scopes_may_overlap(["clinic-application/src/**"], ["clinic-application/src/main/**"])
+    assert scopes_may_overlap(["**/*.java"], ["docs/**/*.md"])
+
+
+def test_contracts_and_task_creation_are_persisted_in_sqlite(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "orchestrator.sqlite3")
+    db.init_db()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "--allow-empty", "-m", "initial"], check=True, capture_output=True)
+
+    with TestClient(app) as client:
+        registered = client.post("/api/repositories", json={"name": "Fixture", "path": str(repo), "default_branch": "main"})
+        assert registered.status_code == 201, registered.text
+        contract = client.post("/api/contracts", json={"title": "DTO boundary", "body": "The DTO contains an id and display name."})
+        assert contract.status_code == 201, contract.text
+        task = client.post("/api/tasks", json={"title": "Document contract consumer", "objective": "Update the consumer to use the shared display field.",
+            "repository_id": registered.json()["id"], "required_capabilities": ["fixture-only-capability"],
+            "file_globs": ["docs/*.md"], "acceptance_criteria": ["Consumer compiles with the shared display field."],
+            "priority": "high", "dependencies": [], "contract_id": contract.json()["id"]})
+        assert task.status_code == 202, task.text
+        assert task.json()["status"] == "queued"
+        assert task.json()["acceptance_criteria"] == ["Consumer compiles with the shared display field."]
+        assert task.json()["priority"] == "high"
+        saved = client.get("/api/tasks").json()
+        assert saved[0]["id"] == task.json()["id"]
+        approved = client.post(f"/api/contracts/{contract.json()['id']}/approve")
+        assert approved.status_code == 200
+
+
+def test_no_remote_task_can_be_completed_locally_without_pushing(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "local-complete.sqlite3")
+    monkeypatch.setattr("app.main.registry.refresh", lambda: [])
+    repo = tmp_path / "local-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "--allow-empty", "-m", "initial"], check=True, capture_output=True)
+
+    with TestClient(app) as client:
+        registered = client.post("/api/repositories", json={"name": "Local only", "path": str(repo), "default_branch": "main"})
+        task = client.post("/api/tasks", json={"title": "Local task", "objective": "Save the completed work locally.",
+            "repository_id": registered.json()["id"], "required_capabilities": ["no-fixture-agent"],
+            "file_globs": ["docs/*.md"]})
+        assert task.status_code == 202
+        with db.transaction() as con:
+            con.execute("UPDATE tasks SET status='awaiting_pr_approval',branch='agent/task-test',worktree=?,validation=? WHERE id=?",
+                (str(tmp_path / "worktree-placeholder"), db.dumps({"passed": True, "scope_passed": True, "commit": "fixture"}), task.json()["id"]))
+        completed = client.post(f"/api/tasks/{task.json()['id']}/complete-local")
+        assert completed.status_code == 200, completed.text
+        assert completed.json()["status"] == "completed"
+        assert completed.json()["pr_url"] is None
+
+
+def test_sqlite_transaction_rolls_back_on_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "rollback.sqlite3")
+    db.init_db()
+    try:
+        with db.transaction() as con:
+            con.execute("INSERT INTO contracts(id,title,body) VALUES('c1','temporary','synthetic')")
+            raise RuntimeError("rollback fixture")
+    except RuntimeError:
+        pass
+    with db.connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM contracts").fetchone()[0] == 0
+
+
+def test_sqlite_snapshot_backup_verify_and_restore_to_new_file(tmp_path):
+    from scripts.db_snapshot import backup_database, integrity_check, restore_database
+
+    source = tmp_path / "active.sqlite3"
+    with __import__("sqlite3").connect(source) as con:
+        con.execute("CREATE TABLE marker(value TEXT)")
+        con.execute("INSERT INTO marker VALUES('synthetic')")
+    snapshot = tmp_path / "backups" / "snapshot.sqlite3"
+    restored = tmp_path / "restored.sqlite3"
+
+    backup_database(source, snapshot)
+    integrity_check(snapshot)
+    restore_database(snapshot, restored)
+
+    with __import__("sqlite3").connect(restored) as con:
+        assert con.execute("SELECT value FROM marker").fetchone()[0] == "synthetic"
+    try:
+        restore_database(snapshot, restored)
+    except FileExistsError:
+        pass
+    else:
+        raise AssertionError("Restore must refuse to overwrite an existing database")
+
+
+def test_health_reports_database_scheduler_and_agents(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "health.sqlite3")
+    monkeypatch.setattr("app.main.registry.refresh", lambda: [])
+    with TestClient(app) as client:
+        response = client.get("/api/health")
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["database"] == {"ok": True, "check": "ok"}
+    assert "agents" in response.json()
+
+
+def test_storage_endpoint_reports_sqlite_worktrees_and_record_counts(tmp_path, monkeypatch):
+    from app import storage as storage_metrics
+
+    data_root = tmp_path / "data"
+    monkeypatch.setattr(storage_metrics, "DATA_ROOT", data_root)
+    monkeypatch.setattr(db, "DB_PATH", data_root / "orchestrator.sqlite3")
+    monkeypatch.setattr("app.main.registry.refresh", lambda: [])
+    data_root.mkdir(parents=True)
+    db.init_db()
+    (data_root / "worktrees" / "fixture" / "task-a").mkdir(parents=True)
+    (data_root / "worktrees" / "fixture" / "task-a" / "build.bin").write_bytes(b"build-output")
+    (data_root / "handoffs").mkdir()
+    (data_root / "handoffs" / "task.md").write_text("handoff", encoding="utf-8")
+
+    with TestClient(app) as client:
+        response = client.get("/api/storage")
+
+    assert response.status_code == 200, response.text
+    snapshot = response.json()
+    assert snapshot["categories"]["worktrees"] == len(b"build-output")
+    assert snapshot["categories"]["handoffs"] == len("handoff")
+    assert snapshot["categories"]["database"] > 0
+    assert snapshot["data_bytes"] == sum(snapshot["categories"].values())
+    assert snapshot["counts"]["tasks"] == 0
+    assert snapshot["disk"]["free_bytes"] > 0
+
+
+def test_bootstrap_does_not_assume_or_register_a_default_product_repository(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "generic-orchestrator.sqlite3")
+    monkeypatch.setattr("app.main.registry.refresh", lambda: [])
+    bootstrap()
+    with db.connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM repositories").fetchone()[0] == 0
+
+
+def test_restart_reconciliation_marks_running_and_publishing_tasks_for_manual_review(tmp_path, monkeypatch):
+    from app.main import reconcile_interrupted_tasks
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "restart.sqlite3")
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path,default_branch) VALUES('r','fixture',?,'main')", (str(tmp_path),))
+        con.execute("INSERT INTO agents(id,name,adapter,command,capabilities,file_globs) VALUES('a','Agent','exec','[]','[]','[\"**/*\"]')")
+        con.execute("INSERT INTO tasks(id,title,objective,repository_id,status,assigned_agent_id,file_globs) VALUES('t1','run','objective','r','running','a','[\"**/*\"]')")
+        con.execute("INSERT INTO tasks(id,title,objective,repository_id,status,assigned_agent_id,file_globs) VALUES('t2','publish','objective','r','publishing','a','[\"**/*\"]')")
+        con.execute("INSERT INTO runs(id,task_id,agent_id,state) VALUES('run1','t1','a','running')")
+
+    reconcile_interrupted_tasks()
+
+    with db.connect() as con:
+        assert con.execute("SELECT status FROM tasks WHERE id='t1'").fetchone()[0] == "failed"
+        assert con.execute("SELECT status FROM tasks WHERE id='t2'").fetchone()[0] == "blocked"
+        assert con.execute("SELECT state FROM runs WHERE id='run1'").fetchone()[0] == "interrupted"
+        assert con.execute("SELECT COUNT(*) FROM events WHERE kind='restart_recovery'").fetchone()[0] == 2
+
+
+def test_validation_engine_blocks_unsupported_project_instead_of_running_maven(tmp_path):
+    import asyncio
+
+    result = asyncio.run(ValidationEngine().validate(str(tmp_path), lambda *_: None))
+    assert result["blocked"] is True
+    assert result["profile"] == "unsupported"
+    assert "Auto mode supports Maven" in result["summary"]
+
+
+def test_secret_scanner_ignores_credential_getters_but_detects_literal_values(tmp_path):
+    source = tmp_path / "Auth.java"
+    source.write_text(
+        "char[] password = command.passwordCopy();\n"
+        "char[] password = txtPassword.getPassword();\n"
+        'String password = "synthetic-fixture-value-123";\n'
+        "token=syntheticfixturetoken123456;\n",
+        encoding="utf-8",
+    )
+
+    assert check_secrets(str(tmp_path), ["Auth.java"]) == ["Auth.java"]
+
+
+def test_secret_scanner_allows_safe_credential_access_expressions(tmp_path):
+    source = tmp_path / "Login.java"
+    source.write_text(
+        "char[] password = command.passwordCopy();\n"
+        "char[] password = txtPassword.getPassword();\n"
+        "String credential = passwordHasher.hash(password);\n",
+        encoding="utf-8",
+    )
+
+    assert check_secrets(str(tmp_path), ["Login.java"]) == []
+
+
+def test_custom_validator_uses_argv_without_shell_and_redacts_output(tmp_path):
+    import asyncio
+    import sys
+
+    result = asyncio.run(ValidationEngine().validate(
+        str(tmp_path), lambda *_: None, "custom",
+        [sys.executable, "-c", "print('token=ghp_abcdefghijklmnopqrstuvwxyz1234567890')"]))
+    assert result["passed"] is True
+    assert result["command"] == "configured project command"
+    assert "ghp_" not in result["tail"]
+    assert "[REDACTED]" in result["tail"]
+
+
+def test_task_diff_returns_patch_for_a_specific_commit(tmp_path):
+    repo = tmp_path / "diff-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    (repo / "note.md").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "note.md"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "-m", "initial"], check=True, capture_output=True)
+    (repo / "note.md").write_text("after\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "commit", "-am", "task change"],
+                   check=True, capture_output=True, env={**__import__("os").environ, "GIT_AUTHOR_NAME": "Fixture",
+                   "GIT_AUTHOR_EMAIL": "fixture@example.invalid", "GIT_COMMITTER_NAME": "Fixture",
+                   "GIT_COMMITTER_EMAIL": "fixture@example.invalid"})
+    commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                            capture_output=True, text=True).stdout.strip()
+
+    preview = task_diff(str(repo), commit)
+
+    assert "-before" in preview["diff"]
+    assert "+after" in preview["diff"]
+    assert preview["truncated"] is False
+
+
+def test_github_remote_detection_rejects_non_github_hosts():
+    from app.git_ops import is_github_remote
+
+    assert is_github_remote("https://github.com/org/repo.git")
+    assert is_github_remote("git@github.com:org/repo.git")
+    assert not is_github_remote("https://gitlab.com/org/repo.git")
+    assert not is_github_remote("https://evil.example/github.com/org/repo.git")
+
+
+def test_scheduler_queues_urgent_tasks_before_normal_tasks(tmp_path, monkeypatch):
+    from app.main import scheduler
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "priority.sqlite3")
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('r','fixture',?)", (str(tmp_path),))
+        for task_id, priority in (("low", "low"), ("normal", "normal"), ("high", "high"), ("urgent", "urgent")):
+            con.execute("INSERT INTO tasks(id,title,objective,repository_id,file_globs,priority) VALUES(?,?,?,?,?,?)",
+                        (task_id, task_id, "fixture objective", "r", '["**/*"]', priority))
+
+    assert [task["id"] for task in scheduler._queued_tasks()] == ["urgent", "high", "normal", "low"]
+
+
+def test_scheduler_atomically_claims_task_only_once_across_instances(tmp_path, monkeypatch):
+    from app.scheduler import TaskScheduler
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "claim.sqlite3")
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('r','fixture',?)", (str(tmp_path),))
+        con.execute("INSERT INTO tasks(id,title,objective,repository_id,file_globs,status) VALUES(?,?,?,?,?,?)",
+                    ("task", "task", "fixture objective", "r", '["docs/*.md"]', "queued"))
+
+    # Separate scheduler objects share SQLite but have no shared in-memory active-task map.
+    assert TaskScheduler._claim_task("task") is True
+    assert TaskScheduler._claim_task("task") is False
+    with db.connect() as con:
+        assert con.execute("SELECT status FROM tasks WHERE id='task'").fetchone()[0] == "planning"
+
+
+def test_successful_validation_clears_stale_task_error(tmp_path, monkeypatch):
+    from app.engine import set_task
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "clear-error.sqlite3")
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('r','fixture',?)", (str(tmp_path),))
+        con.execute("INSERT INTO tasks(id,title,objective,repository_id,file_globs,status,error) VALUES(?,?,?,?,?,?,?)",
+                    ("task", "task", "fixture objective", "r", '["docs/*.md"]', "validating", "stale branch race"))
+
+    set_task("task", "awaiting_pr_approval", validation={"passed": True}, error=None)
+    with db.connect() as con:
+        row = con.execute("SELECT status,error FROM tasks WHERE id='task'").fetchone()
+    assert row[0] == "awaiting_pr_approval"
+    assert row[1] is None
+
+
+def test_agent_credential_check_persists_status_without_raw_cli_output(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "credential.sqlite3")
+    db.init_db()
+    registry = AgentRegistry()
+    agent = registry.register({"id": "codex-fixture", "name": "Codex fixture", "adapter": "codex",
+        "command": ["/fixture/codex"], "capabilities": ["testing"], "file_globs": ["**/*"], "max_parallel": 1})
+    assert agent["credential_status"] == "unchecked"
+
+    class Result:
+        returncode = 0
+        stdout = "Logged in; secret-token-value"
+        stderr = ""
+
+    monkeypatch.setattr("app.registry.subprocess.run", lambda *args, **kwargs: Result())
+    checked = registry.check_token("codex-fixture")
+
+    assert checked["credential_status"] == "valid"
+    assert checked["credential_checked_at"]
+    assert "secret-token-value" not in str(checked)
+    with db.connect() as con:
+        row = con.execute("SELECT * FROM agents WHERE id='codex-fixture'").fetchone()
+    assert "secret-token-value" not in str(dict(row))
+
+
+def test_agent_soft_removal_survives_refresh_and_can_be_restored(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "disabled-agent.sqlite3")
+    db.init_db()
+    registry = AgentRegistry()
+    registry.register({"id": "codex-local", "name": "Codex CLI", "adapter": "codex",
+        "command": ["/fixture/codex"], "capabilities": ["testing"], "file_globs": ["**/*"], "max_parallel": 1})
+    assert registry.set_enabled("codex-local", False)["enabled"] is False
+    monkeypatch.setattr("app.registry.shutil.which", lambda name: "/fixture/codex" if name == "codex" else None)
+    monkeypatch.setattr(AgentRegistry, "_version", staticmethod(lambda command: "fixture version"))
+    monkeypatch.setattr(AgentRegistry, "_auth_status", staticmethod(lambda executable: (True, "signed in")))
+
+    after_refresh = {agent["id"]: agent for agent in registry.refresh()}["codex-local"]
+    assert after_refresh["enabled"] is False
+    assert registry.set_enabled("codex-local", True)["enabled"] is True
+
+
+def test_antigravity_quota_parser_keeps_only_safe_usage_fields():
+    payload = '{"command":{"data":{"groups":[{"name":"Gemini Models","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.72,"reset_time":"2099-01-01","token":"secret"}]}]}}}'
+    usage = AgentRegistry._antigravity_usage(payload)
+    assert usage == {"groups": [{"name": "Gemini Models", "label": "Weekly Limit Remaining", "remaining_percent": 72, "reset_at": "2099-01-01"}]}
+    assert "secret" not in str(usage)
+
+
+def test_agent_api_check_and_remove_keep_agent_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "agent-api.sqlite3")
+    monkeypatch.setattr("app.main.registry.refresh", lambda: [])
+    db.init_db()
+    registry = AgentRegistry()
+    registry.register({"id": "codex-api-fixture", "name": "Codex API fixture", "adapter": "codex",
+        "command": ["/fixture/codex"], "capabilities": ["testing"], "file_globs": ["**/*"], "max_parallel": 1})
+
+    class Result:
+        returncode = 0
+        stdout = "Logged in"
+        stderr = ""
+
+    monkeypatch.setattr("app.registry.subprocess.run", lambda *args, **kwargs: Result())
+    with TestClient(app) as client:
+        checked = client.post("/api/agents/codex-api-fixture/check-token")
+        assert checked.status_code == 200
+        assert checked.json()["credential_status"] == "valid"
+        removed = client.delete("/api/agents/codex-api-fixture")
+        assert removed.status_code == 200
+        assert removed.json()["enabled"] is False
+        with db.connect() as con:
+            assert con.execute("SELECT COUNT(*) FROM agents WHERE id='codex-api-fixture'").fetchone()[0] == 1
+        restored = client.post("/api/agents/codex-api-fixture/restore")
+        assert restored.status_code == 200
+        assert restored.json()["enabled"] is True
+
+
+def test_registry_discovers_authenticated_copilot_cli(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "registry.sqlite3")
+    db.init_db()
+    monkeypatch.setattr("app.registry.shutil.which", lambda name: f"/usr/local/bin/{name}" if name in {"codex", "copilot"} else None)
+    monkeypatch.setattr(AgentRegistry, "_version", staticmethod(lambda command: "fixture-cli 1.0"))
+    monkeypatch.setattr(AgentRegistry, "_auth_status", staticmethod(lambda executable: (True, "signed in")))
+
+    agents = AgentRegistry().refresh()
+
+    by_id = {agent["id"]: agent for agent in agents}
+    assert by_id["codex-local"]["available"] is True
+    assert by_id["copilot-cli"]["adapter"] == "copilot"
+    assert by_id["copilot-cli"]["available"] is True
+    assert by_id["copilot-cli"]["max_parallel"] == 1
+
+
+def test_registry_discovers_antigravity_cli_in_its_default_install_location(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "registry-agy.sqlite3")
+    db.init_db()
+    monkeypatch.setattr("app.registry.shutil.which", lambda name: None)
+    monkeypatch.setattr("app.registry.Path.home", lambda: tmp_path)
+    agy = tmp_path / ".local" / "bin" / "agy"
+    agy.parent.mkdir(parents=True)
+    agy.write_text("synthetic executable marker")
+    monkeypatch.setattr(AgentRegistry, "_version", staticmethod(lambda command: "1.5.0"))
+
+    agents = AgentRegistry().refresh()
+
+    by_id = {agent["id"]: agent for agent in agents}
+    assert by_id["antigravity-cli"]["adapter"] == "antigravity"
+    assert by_id["antigravity-cli"]["command"] == [str(agy)]
+    assert by_id["antigravity-cli"]["available"] is True
+    assert by_id["antigravity-ide"]["adapter"] == "handoff"
+
+
+def test_copilot_adapter_runs_noninteractive_without_trusting_repo(tmp_path, monkeypatch):
+    import asyncio
+    from app.engine import AgentExecutionEngine
+
+    captured = {}
+
+    class FakeOutput:
+        async def readline(self):
+            return b""
+
+    class FakeProcess:
+        stdout = FakeOutput()
+        returncode = 0
+
+        async def wait(self):
+            return 0
+
+    async def fake_create(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    async def run_adapter():
+        engine = object.__new__(AgentExecutionEngine)
+        monkeypatch.setattr("app.engine.asyncio.create_subprocess_exec", fake_create)
+        monkeypatch.setattr("app.engine.log_event", lambda *args, **kwargs: None)
+        return await engine._invoke({"adapter": "copilot", "command": ["/usr/local/bin/copilot"], "id": "copilot-cli"},
+                                    str(tmp_path), tmp_path / "TASK.md", "synthetic prompt", "task-fixture")
+
+    assert asyncio.run(run_adapter()) == 0
+    args = captured["args"]
+    assert args[0] == "/usr/local/bin/copilot"
+    assert "--prompt" in args and "synthetic prompt" in args
+    assert "--allow-all-tools" in args
+    assert "--disable-builtin-mcps" in args
+    assert "--disable-client-telemetry" in args
+    assert "--trust-folder" not in args
+    assert "--allow-all-paths" not in args
+    assert captured["kwargs"]["cwd"] == str(tmp_path)
+
+
+def test_antigravity_adapter_uses_headless_sandbox_and_accept_edits(tmp_path, monkeypatch):
+    import asyncio
+    from pathlib import Path
+    from app.engine import AgentExecutionEngine
+
+    captured = {}
+
+    class FakeOutput:
+        async def readline(self):
+            return b""
+
+    class FakeProcess:
+        stdout = FakeOutput()
+        returncode = 0
+
+        async def wait(self):
+            return 0
+
+    async def fake_create(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    async def run_adapter():
+        engine = object.__new__(AgentExecutionEngine)
+        monkeypatch.setattr("app.engine.asyncio.create_subprocess_exec", fake_create)
+        monkeypatch.setattr("app.engine.log_event", lambda *args, **kwargs: None)
+        return await engine._invoke({"adapter": "antigravity", "command": ["/usr/local/bin/agy"], "id": "antigravity-cli"},
+                                    str(tmp_path), tmp_path / "TASK.md", "synthetic prompt", "task-fixture",
+                                    ["src/main/java/vn/example/Allowed.java"])
+
+    assert asyncio.run(run_adapter()) == 0
+    args = captured["args"]
+    assert args[0] == "/usr/local/bin/agy"
+    assert "--print" in args and any("synthetic prompt" in argument for argument in args)
+    agent_prompt = args[args.index("--print") + 1]
+    assert "requires absolute paths" in agent_prompt
+    assert str(tmp_path.resolve()) in agent_prompt
+    guidance_path = Path(__file__).resolve().parents[2] / "docs" / "PROJECT_CONVENTIONS.md"
+    assert str(guidance_path) in agent_prompt
+    assert "--output-format" in args and "stream-json" in args
+    assert "--mode=accept-edits" in args
+    assert "--dangerously-skip-permissions" not in args
+    assert "--sandbox" in args
+    settings = json.loads(args[args.index("--settings") + 1])
+    assert settings["permissions"]["allow"] == [
+        f"read_file({tmp_path.resolve()}/**)",
+        f"read_file({guidance_path})",
+        f"write_file({(tmp_path / 'src/main/java/vn/example/Allowed.java').resolve()})",
+    ]
+    assert settings["permissions"]["deny"] == ["mcp(*)", "read_url(*)", "execute_url(*)", "command(*)"]
+    assert captured["kwargs"]["cwd"] == str(tmp_path)
+
+
+def test_antigravity_write_permissions_reject_path_traversal(tmp_path):
+    from app.engine import AgentExecutionEngine
+
+    with pytest.raises(RuntimeError, match="unsafe file glob"):
+        AgentExecutionEngine._antigravity_write_permissions(str(tmp_path), ["../outside.txt"])
+
+
+def test_antigravity_write_permissions_reject_symlink_escape(tmp_path):
+    from app.engine import AgentExecutionEngine
+
+    outside = tmp_path.parent / "outside-antigravity-scope"
+    outside.mkdir(exist_ok=True)
+    (tmp_path / "escape").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="outside its worktree"):
+        AgentExecutionEngine._antigravity_write_permissions(str(tmp_path), ["escape/new.txt"])
+
+
+def test_agent_event_summary_reports_tool_permission_path_without_file_contents():
+    from app.engine import AgentExecutionEngine
+
+    line = json.dumps({
+        "event": "step_update",
+        "step_update": {
+            "step_type": "tool",
+            "tool_name": "read_file",
+            "tool_info": {
+                "parameters": {"Path": "/workspace/src/Example.java"},
+                "error": {"message": "permission denied"},
+                "output": "secret source text",
+            },
+        },
+    })
+    summary = AgentExecutionEngine._event_summary(line)
+    assert "/workspace/src/Example.java" in summary
+    assert "permission denied" in summary
+    assert "secret source text" not in summary
+
+
+def test_prune_worktrees_preserves_active_tasks_and_removes_old(tmp_path, monkeypatch):
+    from app.worktrees import prune_worktrees
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "prune-test.sqlite3")
+    monkeypatch.setattr(db, "ROOT", str(tmp_path))
+    db.init_db()
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+    (repo_dir / "README.md").write_text("root")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True)
+
+    repo_id = "repo-1"
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES(?,?,?)", (repo_id, "Repo 1", str(repo_dir)))
+
+    wt_active = tmp_path / "data" / "worktrees" / repo_id / "task-active"
+    wt_old = tmp_path / "data" / "worktrees" / repo_id / "task-old"
+
+    subprocess.run(["git", "worktree", "add", "-b", "branch-active", str(wt_active), "main"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "worktree", "add", "-b", "branch-old", str(wt_old), "main"], cwd=repo_dir, check=True)
+
+    with db.transaction() as con:
+        con.execute("""INSERT INTO tasks(id,title,objective,file_globs,repository_id,status,worktree)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    ("task-active", "Active Task", "Obj", "[]", repo_id, "running", str(wt_active)))
+        con.execute("""INSERT INTO tasks(id,title,objective,file_globs,repository_id,status,worktree,branch,finished_at)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                    ("task-old", "Old Task", "Obj", "[]", repo_id, "completed", str(wt_old), "branch-old", "2020-01-01T00:00:00+00:00"))
+
+    # Dry run should identify old task without deleting
+    dry_result = prune_worktrees(max_age_hours=24.0, dry_run=True)
+    assert dry_result["total_cleaned_count"] == 1
+    assert wt_old.exists()
+    assert wt_active.exists()
+
+    # Actual prune
+    res = prune_worktrees(max_age_hours=24.0, dry_run=False)
+    assert res["fully_removed_count"] == 1
+    assert not wt_old.exists()
+    assert wt_active.exists()
+    assert res["remaining_count"] == 1
+
+    with db.connect() as con:
+        old_row = con.execute("SELECT worktree FROM tasks WHERE id='task-old'").fetchone()
+        assert old_row["worktree"] is None
+
+
+def test_prune_worktrees_cleans_targets_only_for_unmerged_branches(tmp_path, monkeypatch):
+    from app.worktrees import prune_worktrees
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "target-test.sqlite3")
+    monkeypatch.setattr(db, "ROOT", str(tmp_path))
+    db.init_db()
+
+    repo_dir = tmp_path / "repo2"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+    (repo_dir / "README.md").write_text("root")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True)
+
+    repo_id = "repo-2"
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES(?,?,?)", (repo_id, "Repo 2", str(repo_dir)))
+
+    wt_unmerged = tmp_path / "data" / "worktrees" / repo_id / "task-unmerged"
+    subprocess.run(["git", "worktree", "add", "-b", "orchestrator/unmerged-feat", str(wt_unmerged), "main"], cwd=repo_dir, check=True)
+
+    # Add unique commit on this branch so it's NOT merged into main
+    source_file = wt_unmerged / "Service.java"
+    source_file.write_text("public class Service {}")
+    subprocess.run(["git", "add", "Service.java"], cwd=wt_unmerged, check=True)
+    subprocess.run(["git", "commit", "-m", "new feature"], cwd=wt_unmerged, check=True)
+
+    # Add compiler artifact target folder
+    target_dir = wt_unmerged / "target"
+    target_dir.mkdir()
+    (target_dir / "Service.class").write_bytes(b"\xca\xfe\xba\xbe")
+
+    with db.transaction() as con:
+        con.execute("""INSERT INTO tasks(id,title,objective,file_globs,repository_id,status,worktree,branch,finished_at)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                    ("task-unmerged", "Unmerged Task", "Obj", "[]", repo_id, "completed",
+                     str(wt_unmerged), "orchestrator/unmerged-feat", "2020-01-01T00:00:00+00:00"))
+
+    res = prune_worktrees(max_age_hours=24.0, dry_run=False, clean_unmerged_targets_only=True)
+    assert res["target_cleaned_count"] == 1
+    assert res["fully_removed_count"] == 0
+
+    # Source code is preserved 100%!
+    assert wt_unmerged.exists()
+    assert source_file.exists()
+    assert source_file.read_text() == "public class Service {}"
+
+    # Only target/ was cleaned
+    assert not target_dir.exists()
+
+
+
+
+def test_rag_indexes_docs_incrementally_and_injects_excerpts_into_guidance(tmp_path, monkeypatch):
+    from app import rag
+    from app.project_guidance import load_project_guidance
+    monkeypatch.setattr(rag, "RAG_DB_PATH", tmp_path / "rag.sqlite3")
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "bhyt.md").write_text("# BHYT\n\nHạn thẻ bảo hiểm y tế tính đến hết ngày hết hạn.\n", encoding="utf-8")
+    (docs / "other.md").write_text("# Khác\n\nNội dung không liên quan về kho thuốc.\n", encoding="utf-8")
+    first = rag.index_repository("r1", tmp_path)
+    assert first["indexed"] == 2
+    assert rag.index_repository("r1", tmp_path)["unchanged"] == 2
+    hits = rag.search("r1", "hạn thẻ bảo hiểm")
+    assert hits and hits[0]["path"] == "docs/bhyt.md"
+    guidance, files = load_project_guidance(tmp_path, [], "r1", "kiểm tra hạn thẻ bảo hiểm")
+    assert "Relevant documentation excerpts" in guidance
+    assert any("bhyt.md" in f for f in files)
+    (docs / "other.md").unlink()
+    assert rag.index_repository("r1", tmp_path)["removed"] == 1
+
+
+def test_rag_dedupes_sections_and_prefers_decision_docs(tmp_path, monkeypatch):
+    from app import rag
+    monkeypatch.setattr(rag, "RAG_DB_PATH", tmp_path / "rag.sqlite3")
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    long_section = "\n\n".join(f"Audit read quyền deny đoạn {i} " + "x" * 900 for i in range(6))
+    (docs / "phase2-audit-proposal.md").write_text(f"# Audit\n\n{long_section}\n", encoding="utf-8")
+    (docs / "phase2-read-audit-decision.md").write_text("# Quyết định\n\nAudit read quyền deny cho mọi role.\n", encoding="utf-8")
+    for i in range(8):
+        (docs / f"filler{i}.md").write_text(f"# Mục {i}\n\nNội dung về kho thuốc số {i} và lịch hẹn.\n", encoding="utf-8")
+    rag.index_repository("r2", tmp_path)
+    hits = rag.search("r2", "audit read quyền deny", limit=5)
+    assert hits[0]["path"] == "docs/phase2-read-audit-decision.md"
+    assert len({(h["path"], h["heading"]) for h in hits}) == len(hits)
+
+
+def test_prune_events_removes_old_noise_but_keeps_milestones_and_active(tmp_path, monkeypatch):
+    from app import storage
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "events.sqlite3")
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path,default_branch) VALUES('r','r','/tmp/r','main')")
+        for tid, status in (("done", "completed"), ("live", "running")):
+            con.execute("INSERT INTO tasks(id,title,objective,repository_id,status,required_capabilities,file_globs) "
+                        "VALUES(?,?,?,?,?,'[]','[]')", (tid, tid, "o", "r", status))
+        old = "datetime('now','-3 days')"
+        for tid in ("done", "live"):
+            con.execute(f"INSERT INTO events(task_id,kind,message,details,created_at) "
+                        f"VALUES(?,'agent_log','assistant.reasoning_delta: x','{{}}',{old})", (tid,))
+        con.execute(f"INSERT INTO events(task_id,kind,message,details,created_at) "
+                    f"VALUES('done','completed','finished','{{}}',{old})")
+    result = storage.prune_events(vacuum=False)
+    assert result["deleted"]["noise"] == 1
+    with db.connect() as con:
+        kinds = [(r["task_id"], r["kind"]) for r in con.execute("SELECT task_id,kind FROM events ORDER BY id")]
+    assert kinds == [("live", "agent_log"), ("done", "completed")]
+
+
+def test_dashboard_static_mount_serves_spa():
+    with TestClient(app) as client:
+        res = client.get("/")
+        assert res.status_code == 200
+        assert "<!doctype html>" in res.text
+        # API route still takes precedence
+        api_res = client.get("/api/health")
+        assert api_res.status_code == 200
+        assert api_res.json()["ok"] is True
+
+
