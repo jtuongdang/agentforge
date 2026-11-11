@@ -39,6 +39,12 @@ async def serve() -> None:
 
 
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == "--process-watchdog":
+        from app.processes import process_watchdog_main
+        process_watchdog_main(int(sys.argv[2]))
+        return
+    if not sys.argv[0].lower().endswith(".py"):
+        os.environ.setdefault("CLINIC_ORCHESTRATOR_WATCHDOG_EXECUTABLE", str(Path(sys.argv[0]).resolve()))
     asyncio.run(serve())
 
 

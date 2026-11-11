@@ -59,6 +59,38 @@ def post_json(url: str, payload: dict, headers: dict[str, str], expected_status:
         return json.loads(response.read())
 
 
+def verify_packaged_crash_guard(binary: Path, temp: Path) -> None:
+    if os.name != "posix":
+        return
+    backend_root = Path(__file__).resolve().parents[1] / "backend"
+    ready = temp / "guardian-owner-ready"
+    marker = temp / "guardian-worker-survived-owner"
+    owner_code = (
+        "import asyncio,os,pathlib,sys; sys.path.insert(0,sys.argv[1]); "
+        "os.environ['CLINIC_ORCHESTRATOR_WATCHDOG_EXECUTABLE']=sys.argv[2]; "
+        "from app.processes import create_managed_process,process_group_options\n"
+        "async def main():\n"
+        "    child=\"import pathlib,sys,time; time.sleep(1.0); pathlib.Path(sys.argv[1]).write_text('survived')\"\n"
+        "    await create_managed_process(sys.executable,'-c',child,%r,stdout=asyncio.subprocess.DEVNULL,"
+        "stderr=asyncio.subprocess.DEVNULL,**process_group_options())\n"
+        "    pathlib.Path(sys.argv[3]).write_text('ready')\n"
+        "    os._exit(0)\n"
+        "asyncio.run(main())" % (str(marker),)
+    )
+    owner = subprocess.Popen([sys.executable, "-c", owner_code, str(backend_root), str(binary), str(ready)],
+                             cwd=backend_root, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + 15
+    while not ready.exists() and owner.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    _, error = owner.communicate(timeout=5)
+    if owner.returncode != 0 or not ready.is_file():
+        raise RuntimeError("Packaged crash guardian failed to start: " + (error or "owner exited early")[-2000:])
+    time.sleep(1.3)
+    if marker.exists():
+        raise RuntimeError("Worker survived after its owner process crashed")
+
+
 @contextmanager
 def temporary_workspace():
     """Retry Windows temp cleanup while the terminated sidecar releases files."""
@@ -89,6 +121,7 @@ def main() -> int:
     messages: queue.Queue[str | None] = queue.Queue()
     tail: list[str] = []
     with temporary_workspace() as temp:
+        verify_packaged_crash_guard(binary, temp)
         env = os.environ.copy()
         env["CLINIC_ORCHESTRATOR_DATA_DIR"] = str(temp / "data")
         process = subprocess.Popen(
@@ -171,7 +204,7 @@ def main() -> int:
                 restored_integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
             if restored_integrity != "ok" or restored["repository_count"] != 0:
                 raise RuntimeError("Packaged restored profile failed database or repository checks")
-            print(f"Packaged sidecar smoke passed: API/token auth, OS credential store, schema={version}, provider metadata, checkpoint export/restore.")
+            print(f"Packaged sidecar smoke passed: API/token auth, OS credential store, schema={version}, provider metadata, checkpoint export/restore, process crash containment.")
             return 0
         except Exception as exc:
             print(f"Packaged sidecar smoke failed: {exc}", file=sys.stderr)

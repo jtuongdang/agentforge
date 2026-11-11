@@ -1630,7 +1630,7 @@ def test_copilot_adapter_runs_noninteractive_without_trusting_repo(tmp_path, mon
 
     async def run_adapter():
         engine = object.__new__(AgentExecutionEngine)
-        monkeypatch.setattr("app.engine.asyncio.create_subprocess_exec", fake_create)
+        monkeypatch.setattr("app.engine.create_managed_process", fake_create)
         monkeypatch.setattr("app.engine.log_event", lambda *args, **kwargs: None)
         return await engine._invoke({"adapter": "copilot", "command": ["/usr/local/bin/copilot"], "id": "copilot-cli"},
                                     str(tmp_path), tmp_path / "TASK.md", "synthetic prompt", "task-fixture")
@@ -1672,7 +1672,7 @@ def test_antigravity_adapter_uses_headless_sandbox_and_accept_edits(tmp_path, mo
 
     async def run_adapter():
         engine = object.__new__(AgentExecutionEngine)
-        monkeypatch.setattr("app.engine.asyncio.create_subprocess_exec", fake_create)
+        monkeypatch.setattr("app.engine.create_managed_process", fake_create)
         monkeypatch.setattr("app.engine.log_event", lambda *args, **kwargs: None)
         return await engine._invoke({"adapter": "antigravity", "command": ["/usr/local/bin/agy"], "id": "antigravity-cli"},
                                     str(tmp_path), tmp_path / "TASK.md", "synthetic prompt", "task-fixture",
@@ -2166,6 +2166,35 @@ def test_windows_job_object_kills_worker_when_owner_crashes(tmp_path):
     assert owner.wait(timeout=5) == 0
     time.sleep(1.3)
     assert not marker.exists(), "Windows worker survived an abrupt owner process exit"
+
+
+def test_posix_guard_kills_worker_when_owner_crashes(tmp_path):
+    import os
+    import subprocess
+    import sys
+    import time
+
+    if os.name != "posix":
+        pytest.skip("POSIX process guardian crash containment is platform-specific")
+    ready = tmp_path / "guardian-owner-ready"
+    marker = tmp_path / "guardian-worker-survived-owner"
+    child_code = ("import pathlib,time; time.sleep(1.0); pathlib.Path(%r).write_text('survived')") % str(marker)
+    owner_code = ("import asyncio,os,sys,pathlib; from app.processes import create_managed_process,process_group_options\n"
+                  "async def main():\n"
+                  "    await create_managed_process(sys.executable,'-c',%r,stdout=asyncio.subprocess.DEVNULL,"
+                  "stderr=asyncio.subprocess.DEVNULL,**process_group_options())\n"
+                  "    pathlib.Path(%r).write_text('ready')\n"
+                  "    os._exit(0)\n"
+                  "asyncio.run(main())") % (child_code, str(ready))
+    backend_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    owner = subprocess.Popen([sys.executable, "-c", owner_code], cwd=backend_root)
+    deadline = time.monotonic() + 10
+    while not ready.exists() and owner.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert ready.exists(), "crash fixture failed to start the guarded worker"
+    assert owner.wait(timeout=5) == 0
+    time.sleep(1.3)
+    assert not marker.exists(), "POSIX worker survived an abrupt owner process exit"
 
 
 def test_dashboard_static_mount_serves_spa(monkeypatch):
