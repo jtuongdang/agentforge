@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -49,6 +50,24 @@ def read_json(url: str, headers: dict[str, str] | None = None) -> dict:
         return json.loads(response.read())
 
 
+@contextmanager
+def temporary_workspace():
+    """Retry Windows temp cleanup while the terminated sidecar releases files."""
+    temp = tempfile.TemporaryDirectory(prefix="devagent-sidecar-smoke-")
+    try:
+        yield Path(temp.name)
+    finally:
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                temp.cleanup()
+                break
+            except PermissionError:
+                if os.name != "nt" or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.25)
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("Usage: smoke_desktop_backend.py PATH_TO_PACKAGED_SIDECAR", file=sys.stderr)
@@ -60,9 +79,9 @@ def main() -> int:
 
     messages: queue.Queue[str | None] = queue.Queue()
     tail: list[str] = []
-    with tempfile.TemporaryDirectory(prefix="devagent-sidecar-smoke-") as temp:
+    with temporary_workspace() as temp:
         env = os.environ.copy()
-        env["CLINIC_ORCHESTRATOR_DATA_DIR"] = str(Path(temp) / "data")
+        env["CLINIC_ORCHESTRATOR_DATA_DIR"] = str(temp / "data")
         process = subprocess.Popen(
             [str(binary)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1,
@@ -107,7 +126,7 @@ def main() -> int:
             if not isinstance(fleet, dict) or "settings" not in fleet:
                 raise RuntimeError("Authenticated Fleet API returned an unexpected response")
 
-            database = Path(temp) / "data" / "orchestrator.sqlite3"
+            database = temp / "data" / "orchestrator.sqlite3"
             if not database.is_file():
                 raise RuntimeError("Packaged sidecar did not create its application database")
             with sqlite3.connect(database) as con:
