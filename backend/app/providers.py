@@ -121,10 +121,10 @@ def _keyring():
             except ImportError:
                 kwallet = None
             _ = (SecretService, kwallet)
-        allowed = ("keyring.backends.macOS", "keyring.backends.Windows", "keyring.backends.SecretService",
-                   "keyring.backends.kwallet")
+        allowed = {"keyring.backends.macOS", "keyring.backends.Windows", "keyring.backends.SecretService",
+                   "keyring.backends.kwallet"}
         backend = keyring.get_keyring()
-        if not type(backend).__module__.startswith(allowed):
+        if type(backend).__module__ not in allowed:
             raise ProviderError("The active credential backend is not an approved OS keychain")
         return keyring
     except ProviderError:

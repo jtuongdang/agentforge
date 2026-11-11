@@ -581,6 +581,20 @@ def test_ollama_provider_rejects_non_loopback_endpoint():
         create_connection("ollama", "Untrusted Ollama", endpoint="http://192.168.1.20:11434")
 
 
+def test_provider_credential_store_rejects_non_os_keyring(monkeypatch):
+    import keyring
+    from app import providers
+
+    class InsecureBackend:
+        priority = 1
+
+    InsecureBackend.__module__ = "keyrings.alt.file"
+    monkeypatch.setattr(providers.sys, "platform", "freebsd")
+    monkeypatch.setattr(keyring, "get_keyring", lambda: InsecureBackend())
+    with pytest.raises(providers.ProviderError, match="not an approved OS keychain"):
+        providers._keyring()
+
+
 def test_provider_schema_upgrade_snapshots_version_five_database(tmp_path, monkeypatch):
     import sqlite3
 
