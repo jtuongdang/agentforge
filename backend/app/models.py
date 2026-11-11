@@ -116,6 +116,15 @@ class FleetSettingsUpdate(BaseModel):
     disk_reserve_per_run_bytes: int | None = Field(default=None, ge=64 * 1024**2, le=1024**4)
 
 
+class ProjectCheckpointCreate(BaseModel):
+    include_uncommitted: bool = False
+
+
+class ProjectCheckpointRestore(BaseModel):
+    checkpoint_path: str = Field(min_length=1, max_length=4096)
+    destination_parent: str = Field(min_length=1, max_length=4096)
+
+
 class LeadPairingCreate(BaseModel):
     scopes: list[str] = Field(default_factory=lambda: ["handover:read"])
 

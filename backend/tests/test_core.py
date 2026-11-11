@@ -1658,3 +1658,257 @@ def test_dashboard_static_mount_serves_spa(monkeypatch):
         assert api_res.json()["ok"] is True
 
 
+def _portable_checkpoint_fixture(tmp_path, monkeypatch):
+    import json
+    import subprocess
+    from app import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "data" / "orchestrator.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.DB_PATH.parent.mkdir(parents=True)
+    db.init_db()
+    repo = tmp_path / "source project"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    (repo / "README.md").write_text("safe committed fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "-m", "fixture"], check=True, capture_output=True)
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path,remote,default_branch) VALUES(?,?,?,?,?)",
+                    ("repo-a", "Fixture", str(repo), "https://user:ghp_" + "A" * 36 + "@github.com/org/repo.git", "main"))
+        con.execute("INSERT INTO agents(id,name,adapter,command,enabled) VALUES(?,?,?,?,1)",
+                    ("agent-a", "CLI", "exec", json.dumps(["agent", "ghp_" + "B" * 36])))
+        con.execute("INSERT INTO system_settings(key,value) VALUES('provider.api_token',?)", ("ghp_" + "C" * 36,))
+        con.execute("INSERT INTO system_settings(key,value) VALUES('fleet.max_active_runs','2')")
+    return repo
+
+
+def test_checkpoint_export_redacts_credentials_paths_and_disabled_agents(tmp_path, monkeypatch):
+    import json
+    import sqlite3
+    import zipfile
+    from app import portability
+
+    repo = _portable_checkpoint_fixture(tmp_path, monkeypatch)
+    (repo / "local-only.txt").write_text("uncommitted but not secret\n", encoding="utf-8")
+    target = tmp_path / "fixture.devagent"
+
+    result = portability.create_checkpoint(target)
+
+    assert result["repository_count"] == 1
+    assert "local-only.txt" in result["omitted_uncommitted_paths"]
+    summary = portability.verify_checkpoint(target)
+    assert summary["repositories"][0]["refs"] >= 1
+    with zipfile.ZipFile(target) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        assert str(repo) not in archive.read("database.sqlite3").decode("latin1")
+        assert str(repo) not in json.dumps(manifest)
+        all_content = b"".join(archive.read(name) for name in archive.namelist())
+        for token in ("ghp_" + "A" * 36, "ghp_" + "B" * 36, "ghp_" + "C" * 36):
+            assert token.encode() not in all_content
+        assert b"user:ghp_" not in all_content
+        assert b"[LOCAL_PATH]" not in json.dumps(manifest).encode()
+        snapshot = tmp_path / "snapshot.sqlite3"
+        snapshot.write_bytes(archive.read("database.sqlite3"))
+    with sqlite3.connect(snapshot) as con:
+        assert con.execute("SELECT path,remote,enabled,validation_command FROM repositories WHERE id='repo-a'").fetchone() == (
+            "portable://repo-a", "https://github.com/org/repo.git", 0, "[]")
+        assert con.execute("SELECT command,enabled,available FROM agents WHERE id='agent-a'").fetchone() == ("[]", 0, 0)
+        assert con.execute("SELECT value FROM system_settings WHERE key='fleet.max_active_runs'").fetchone() == ("2",)
+        assert con.execute("SELECT COUNT(*) FROM system_settings WHERE key='provider.api_token'").fetchone()[0] == 0
+
+
+def test_checkpoint_includes_explicit_safe_uncommitted_files_and_rejects_secrets(tmp_path, monkeypatch):
+    import zipfile
+    from app import portability
+
+    repo = _portable_checkpoint_fixture(tmp_path, monkeypatch)
+    changed = repo / "README.md"
+    changed.write_text("safe changed content\n", encoding="utf-8")
+    target = tmp_path / "included.devagent"
+    portability.create_checkpoint(target, include_uncommitted=True)
+    with zipfile.ZipFile(target) as archive:
+        assert archive.read("repositories/repo-a/working-tree/README.md") == b"safe changed content\n"
+
+    changed.write_text("api_key = '" + "X" * 28 + "'\n", encoding="utf-8")
+    rejected = tmp_path / "rejected.devagent"
+    with pytest.raises(ValueError, match="Possible secrets"):
+        portability.create_checkpoint(rejected, include_uncommitted=True)
+    assert not rejected.exists()
+
+
+def test_checkpoint_is_discarded_if_database_changes_during_export(tmp_path, monkeypatch):
+    from app import db, portability
+
+    _portable_checkpoint_fixture(tmp_path, monkeypatch)
+    original_verify = portability.verify_checkpoint
+
+    def verify_then_write(path):
+        result = original_verify(path)
+        with db.transaction() as con:
+            con.execute("INSERT INTO system_settings(key,value) VALUES('concurrent.write','1')")
+        return result
+
+    monkeypatch.setattr(portability, "verify_checkpoint", verify_then_write)
+    target = tmp_path / "concurrent.devagent"
+    with pytest.raises(portability.CheckpointError, match="Application data changed during export"):
+        portability.create_checkpoint(target)
+    assert not target.exists()
+
+
+def test_checkpoint_is_discarded_if_git_refs_change_during_export(tmp_path, monkeypatch):
+    import subprocess
+    from app import portability
+
+    repo = _portable_checkpoint_fixture(tmp_path, monkeypatch)
+    original_verify = portability.verify_checkpoint
+
+    def verify_then_commit(path):
+        result = original_verify(path)
+        (repo / "raced.txt").write_text("committed during export\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "raced.txt"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c",
+                        "user.email=fixture@example.invalid", "commit", "-m", "racing commit"],
+                       check=True, capture_output=True)
+        return result
+
+    monkeypatch.setattr(portability, "verify_checkpoint", verify_then_commit)
+    target = tmp_path / "racing-ref.devagent"
+    with pytest.raises(portability.CheckpointError, match="Repository files changed during export"):
+        portability.create_checkpoint(target)
+    assert not target.exists()
+
+
+def test_checkpoint_verifier_rejects_zip_path_traversal(tmp_path):
+    import zipfile
+    from app.portability import CheckpointError, verify_checkpoint
+
+    target = tmp_path / "unsafe.devagent"
+    with zipfile.ZipFile(target, "w") as archive:
+        archive.writestr("../escape.txt", "unsafe")
+    with pytest.raises(CheckpointError, match="unsafe archive path"):
+        verify_checkpoint(target)
+
+
+def test_checkpoint_api_export_download_and_cleanup(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from app import settings as settings_module
+    from app import main as main_module
+
+    repo = _portable_checkpoint_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(main_module, "settings", replace(settings_module.settings, data_dir=tmp_path / "data"))
+    with authenticated_test_client(monkeypatch) as client:
+        preview = client.get("/api/storage/checkpoint-preview")
+        assert preview.status_code == 200
+        assert str(repo) not in preview.text
+        assert "fingerprint" not in preview.json()["repositories"][0]
+        assert "refs" not in preview.json()["repositories"][0]
+        created = client.post("/api/storage/checkpoints", json={"include_uncommitted": False})
+        assert created.status_code == 200
+        checkpoint_id = created.json()["id"]
+        download = client.get(f"/api/storage/checkpoints/{checkpoint_id}")
+        assert download.status_code == 200
+        assert download.headers["content-type"] == "application/vnd.devagent.checkpoint"
+        assert download.content[:2] == b"PK"
+        assert not (tmp_path / "data" / "checkpoints" / f"{checkpoint_id}.devagent").exists()
+
+
+def test_checkpoint_restore_remaps_repositories_and_reconciles_worktrees(tmp_path, monkeypatch):
+    import sqlite3
+    import subprocess
+    from app import db, portability
+
+    repo = _portable_checkpoint_fixture(tmp_path, monkeypatch)
+    worktree = tmp_path / "task worktree"
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(worktree), "main"],
+                   check=True, capture_output=True)
+    (repo / "README.md").write_text("safe main overlay\n", encoding="utf-8")
+    (worktree / "README.md").write_text("safe task overlay\n", encoding="utf-8")
+    with db.transaction() as con:
+        con.execute("INSERT INTO agents(id,name,adapter,command) VALUES('agent-task','CLI','exec','[]')")
+        con.execute("INSERT INTO tasks(id,title,objective,repository_id,file_globs,status,branch,worktree,"
+                    "assigned_agent_id) VALUES(?,?,?,?,?,?,?,?,?)",
+                    ("task-a", "Task", "Restore a safe checkpoint", "repo-a", '["**/*"]',
+                     "completed", "main", str(worktree), "agent-task"))
+
+    checkpoint = tmp_path / "restore-source.devagent"
+    portability.create_checkpoint(checkpoint, include_uncommitted=True)
+    restored = portability.restore_checkpoint(checkpoint, tmp_path / "restored-profile")
+
+    repo_path = tmp_path / "restored-profile" / "repositories" / "repo-a"
+    worktree_path = tmp_path / "restored-profile" / "worktrees" / "task-a"
+    assert restored["repository_count"] == 1
+    assert restored["worktree_count"] == 1
+    assert (repo_path / "README.md").read_text(encoding="utf-8") == "safe main overlay\n"
+    assert (worktree_path / "README.md").read_text(encoding="utf-8") == "safe task overlay\n"
+    assert subprocess.run(["git", "-C", str(repo_path), "remote", "get-url", "origin"],
+                           check=True, capture_output=True, text=True).stdout.strip() == "https://github.com/org/repo.git"
+    with sqlite3.connect(restored["database_path"]) as con:
+        repo_row = con.execute("SELECT path,enabled FROM repositories WHERE id='repo-a'").fetchone()
+        task_row = con.execute("SELECT status,worktree,error FROM tasks WHERE id='task-a'").fetchone()
+        agent_row = con.execute("SELECT command,enabled FROM agents WHERE id='agent-task'").fetchone()
+    assert repo_row == (str(repo_path.resolve()), 1)
+    assert task_row[0] == "blocked"
+    assert task_row[1] == str(worktree_path.resolve())
+    assert "reconcile before retry" in task_row[2]
+    assert agent_row == ("[]", 0)
+
+
+def test_checkpoint_restore_refuses_existing_destination(tmp_path, monkeypatch):
+    from app import portability
+
+    _portable_checkpoint_fixture(tmp_path, monkeypatch)
+    checkpoint = tmp_path / "restore-source.devagent"
+    portability.create_checkpoint(checkpoint)
+    existing = tmp_path / "existing-profile"
+    existing.mkdir()
+    original = existing / "keep.txt"
+    original.write_text("preserve", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="Refusing to overwrite"):
+        portability.restore_checkpoint(checkpoint, existing)
+    assert original.read_text(encoding="utf-8") == "preserve"
+
+
+def test_checkpoint_restore_does_not_run_global_git_filters(tmp_path, monkeypatch):
+    import subprocess
+    from app import portability
+
+    repo = _portable_checkpoint_fixture(tmp_path, monkeypatch)
+    (repo / ".gitattributes").write_text("*.txt filter=restore-test\n", encoding="utf-8")
+    (repo / "payload.txt").write_text("safe payload\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", ".gitattributes", "payload.txt"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c",
+                    "user.email=fixture@example.invalid", "commit", "-m", "filter fixture"],
+                   check=True, capture_output=True)
+    marker = tmp_path / "global-filter-ran"
+    global_config = tmp_path / "gitconfig"
+    global_config.write_text(f'[filter "restore-test"]\n smudge = touch "{marker}"\n required = false\n',
+                             encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    checkpoint = tmp_path / "filter-source.devagent"
+    portability.create_checkpoint(checkpoint)
+    portability.restore_checkpoint(checkpoint, tmp_path / "filter-restored")
+    assert not marker.exists()
+
+
+def test_checkpoint_restore_api_creates_side_by_side_profile(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from pathlib import Path
+    from app import main as main_module
+    from app import portability, settings as settings_module
+
+    _portable_checkpoint_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(main_module, "settings", replace(settings_module.settings, data_dir=tmp_path / "data"))
+    checkpoint = tmp_path / "api-restore.devagent"
+    portability.create_checkpoint(checkpoint)
+    with authenticated_test_client(monkeypatch) as client:
+        response = client.post("/api/storage/checkpoints/restore", json={
+            "checkpoint_path": str(checkpoint), "destination_parent": str(tmp_path)})
+    assert response.status_code == 200
+    result = response.json()
+    assert result["repository_count"] == 1
+    assert (Path(result["path"]) / "data" / "orchestrator.sqlite3").is_file()
+
+

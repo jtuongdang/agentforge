@@ -16,10 +16,12 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 from . import db
+from . import portability
 from . import tech_lead
 from .engine import get_task, log_event, set_task
 from . import fleet as fleet_manager
@@ -27,7 +29,8 @@ from .git_ops import (changed_paths, check_repository_sync, is_github_remote, li
                       git_author, register_repository, repository, run, validate_repository_base,
                       validated_revision_is_current)
 from .models import (AgentCreate, CompleteHandoff, ContractCreate, FleetSettingsUpdate, LeadHandshake,
-                     LeadPairingCreate, LeadReview, RepositoryCreate, RepositoryPreflight, TaskCreate)
+                     LeadPairingCreate, LeadReview, ProjectCheckpointCreate, ProjectCheckpointRestore,
+                     RepositoryCreate, RepositoryPreflight, TaskCreate)
 from .contracts import ContractManager
 from .orchestrator import Orchestrator
 from .settings import settings
@@ -363,6 +366,92 @@ def storage():
         return storage_snapshot()
     except Exception as exc:
         raise HTTPException(500, f"Could not read local storage metrics: {type(exc).__name__}") from exc
+
+
+@app.get("/api/storage/checkpoint-preview")
+def checkpoint_preview():
+    try:
+        preview = portability.checkpoint_preview()
+        for repo in preview["repositories"]:
+            repo.pop("path", None)
+            repo.pop("fingerprint", None)
+            repo.pop("refs", None)
+            for worktree in repo["worktrees"]:
+                worktree.pop("path", None)
+                worktree.pop("fingerprint", None)
+                worktree.pop("refs", None)
+        return preview
+    except portability.CheckpointError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, "Could not inspect project checkpoint state") from exc
+
+
+@app.post("/api/storage/checkpoints")
+def create_project_checkpoint(body: ProjectCheckpointCreate):
+    checkpoint_dir = settings.data_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    for entry in checkpoint_dir.iterdir():
+        if entry.is_symlink() or not entry.is_file() or entry.suffix != ".devagent":
+            continue
+        try:
+            if now - entry.stat().st_mtime > 2 * 24 * 60 * 60:
+                entry.unlink()
+        except OSError:
+            pass
+    checkpoint_id = uuid.uuid4().hex
+    path = checkpoint_dir / f"{checkpoint_id}.devagent"
+    try:
+        result = portability.create_checkpoint(path, include_uncommitted=body.include_uncommitted)
+        return {"id": checkpoint_id, "filename": path.name, "size_bytes": result["size_bytes"],
+                "sha256": result["sha256"], "repository_count": result["repository_count"],
+                "uncommitted_included": result["uncommitted_included"],
+                "omitted_uncommitted_paths": result["omitted_uncommitted_paths"]}
+    except (portability.CheckpointError, FileExistsError) as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(409, str(exc)) from exc
+    except OSError as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(507, "Could not write the project checkpoint; check free disk space and permissions.") from exc
+
+
+@app.get("/api/storage/checkpoints/{checkpoint_id}")
+def download_project_checkpoint(checkpoint_id: str):
+    if not re.fullmatch(r"[0-9a-f]{32}", checkpoint_id):
+        raise HTTPException(404, "Checkpoint not found")
+    path = settings.data_dir / "checkpoints" / f"{checkpoint_id}.devagent"
+    if path.is_symlink() or not path.is_file():
+        raise HTTPException(404, "Checkpoint not found")
+    return FileResponse(path, filename=path.name, media_type="application/vnd.devagent.checkpoint",
+                        background=BackgroundTask(path.unlink, missing_ok=True))
+
+
+@app.delete("/api/storage/checkpoints/{checkpoint_id}")
+def delete_project_checkpoint(checkpoint_id: str):
+    if not re.fullmatch(r"[0-9a-f]{32}", checkpoint_id):
+        raise HTTPException(404, "Checkpoint not found")
+    path = settings.data_dir / "checkpoints" / f"{checkpoint_id}.devagent"
+    if path.is_symlink() or not path.is_file():
+        raise HTTPException(404, "Checkpoint not found")
+    path.unlink()
+    return {"deleted": True}
+
+
+@app.post("/api/storage/checkpoints/restore")
+def restore_project_checkpoint(body: ProjectCheckpointRestore):
+    destination_parent = Path(body.destination_parent).expanduser()
+    name = f"DevAgent-Restored-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    destination = destination_parent / name
+    try:
+        result = portability.restore_checkpoint(Path(body.checkpoint_path), destination)
+        return result
+    except FileExistsError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except portability.CheckpointError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(507, "Could not restore checkpoint; check free disk space and permissions.") from exc
 
 
 @app.get("/api/fleet")

@@ -40,6 +40,9 @@ type Contract = { id: string; title: string; body: string; state: string; versio
 type EventRow = { id: number; kind: string; message: string; created_at: string; details: Record<string, unknown> }
 type Nav = 'Overview' | 'Tasks' | 'Agents' | 'Contracts' | 'History' | 'Storage' | 'Fleet'
 type StorageMetrics = { measured_at: string; data_bytes: number; categories: Record<string, number>; database_files: Record<string, number>; sqlite_logical_bytes: number; sqlite_unused_bytes: number; disk: { total_bytes: number; free_bytes: number; used_percent: number }; counts: { repositories: number; agents: number; tasks: number; runs: number; events: number; active_tasks: number } }
+type CheckpointWorktree = { task_id: string; available: boolean; dirty_paths: string[]; secret_paths?: string[]; secret_scan_incomplete_paths?: string[]; scan_error?: string }
+type CheckpointRepository = { id: string; name: string; default_branch: string; remote: string | null; available: boolean; dirty_paths: string[]; secret_paths?: string[]; secret_scan_incomplete_paths?: string[]; scan_error?: string; worktrees: CheckpointWorktree[] }
+type CheckpointPreview = { active_tasks: number; repositories: CheckpointRepository[]; uncommitted_included_by_default: boolean; credential_policy: string }
 type FleetSettings = { max_active_runs: number; max_parallel_builds: number; max_per_credential: number; min_free_disk_bytes: number; disk_reserve_per_run_bytes: number }
 type FleetSnapshot = { settings: FleetSettings; active_runs: { task_id: string; title: string; status: string; assigned_agent_id?: string; agent_name?: string; repository_name?: string; run_id?: string }[]; credential_cooldowns: { adapter: string; executable: string; reason: string; expires_at: string }[]; active_run_count: number; queued_tasks: number; draining: boolean; builds_active: number; disk: { free_bytes: number; required_reserve_bytes: number; can_admit_run: boolean } }
 type LeadStatus = { connected: boolean; session: { session_id: string; client_id: string; client_name: string; scopes: string[]; lease_expires_at: string; session_expires_at: string } | null }
@@ -58,6 +61,26 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const contentType = response.headers.get('content-type') || ''
   if (contentType.includes('application/json')) return response.json() as Promise<T>
   return response.text() as Promise<T>
+}
+
+async function downloadCheckpoint(checkpointId: string, filename: string) {
+  const [base, token] = await Promise.all([getApiBase(), getApiToken()])
+  const response = await fetch(`${base}/api/storage/checkpoints/${encodeURIComponent(checkpointId)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`
+    try { const body = await response.json(); detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail) } catch { /* keep default */ }
+    throw new Error(detail)
+  }
+  const objectUrl = URL.createObjectURL(await response.blob())
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000)
 }
 
 const date = (value?: string) => value ? new Date(value.replace(' ', 'T')).toLocaleString() : '—'
@@ -375,6 +398,53 @@ function App() {
 
 function formatBytes(value:number) { if (value < 1024) return `${value} B`; const units = ['KB','MB','GB','TB']; let size = value / 1024; let unit = units[0]; for (let i = 1; size >= 1024 && i < units.length; i++) { size /= 1024; unit = units[i] } return `${size.toFixed(size >= 100 ? 0 : 1)} ${unit}` }
 function StoragePage({metrics,error,busy,onRefresh}:{metrics:StorageMetrics|null;error:string;busy:boolean;onRefresh:()=>void}) {
+  const [checkpointPreview,setCheckpointPreview] = useState<CheckpointPreview|null>(null)
+  const [checkpointBusy,setCheckpointBusy] = useState(false)
+  const [includeUncommitted,setIncludeUncommitted] = useState(false)
+  const [checkpointError,setCheckpointError] = useState('')
+  const [checkpointNotice,setCheckpointNotice] = useState('')
+  useEffect(() => { void api<CheckpointPreview>('/storage/checkpoint-preview').then(setCheckpointPreview).catch(e => setCheckpointError(e instanceof Error ? e.message : 'Could not inspect checkpoint state')) }, [])
+  const checkpointDirtyCount = checkpointPreview?.repositories.reduce((count, repo) => count + repo.dirty_paths.length + repo.worktrees.reduce((n, worktree) => n + worktree.dirty_paths.length, 0), 0) || 0
+  const checkpointBlocked = Boolean(checkpointPreview && (checkpointPreview.repositories.some(repo => !repo.available || (includeUncommitted && (repo.scan_error || repo.secret_paths?.length || repo.secret_scan_incomplete_paths?.length || repo.worktrees.some(worktree => !worktree.available || worktree.scan_error || worktree.secret_paths?.length || worktree.secret_scan_incomplete_paths?.length))))))
+  const exportCheckpoint = async () => {
+    if (!checkpointPreview || checkpointBusy) return
+    if (includeUncommitted && !window.confirm('Gói checkpoint sẽ chứa nội dung các file thay đổi chưa commit. Hãy kiểm tra danh sách file; tiếp tục chỉ khi bạn muốn sao lưu các thay đổi này.')) return
+    setCheckpointBusy(true); setCheckpointError(''); setCheckpointNotice('')
+    let checkpointId = ''
+    try {
+      const checkpoint = await api<{id:string;filename:string;size_bytes:number;sha256:string;omitted_uncommitted_paths:string[]}>('/storage/checkpoints', {
+        method: 'POST', body: JSON.stringify({ include_uncommitted: includeUncommitted }),
+      })
+      checkpointId = checkpoint.id
+      if (isTauri()) {
+        const saved = await invoke<string|null>('save_checkpoint', { fileName: checkpoint.filename })
+        if (!saved) { await api(`/storage/checkpoints/${checkpoint.id}`, { method: 'DELETE' }); setCheckpointNotice('Đã hủy lưu file checkpoint.'); return }
+        await api(`/storage/checkpoints/${checkpoint.id}`, { method: 'DELETE' })
+        setCheckpointNotice(`Đã lưu ${formatBytes(checkpoint.size_bytes)} tại ${saved}`)
+      } else {
+        await downloadCheckpoint(checkpoint.id, checkpoint.filename)
+        setCheckpointNotice(`Đã tạo checkpoint ${formatBytes(checkpoint.size_bytes)}. Trình duyệt sẽ lưu file .devagent.`)
+      }
+    } catch (e) {
+      setCheckpointError(e instanceof Error ? e.message : 'Could not create project checkpoint')
+      if (checkpointId) { try { await api(`/storage/checkpoints/${checkpointId}`, { method: 'DELETE' }) } catch { /* stale checkpoints are removed after two days */ } }
+    } finally { setCheckpointBusy(false) }
+  }
+  const restoreCheckpoint = async () => {
+    if (!isTauri() || checkpointBusy) return
+    setCheckpointBusy(true); setCheckpointError(''); setCheckpointNotice('')
+    try {
+      const selected = await invoke<[string,string]|null>('choose_checkpoint_restore_paths')
+      if (!selected) return
+      if (!window.confirm('Checkpoint sẽ được khôi phục thành một profile mới trong thư mục đã chọn. Dữ liệu Orchestrator hiện tại không bị thay thế; agent credentials vẫn phải cấu hình lại. Tiếp tục?')) return
+      const restored = await api<{path:string;repository_count:number;worktree_count:number}>('/storage/checkpoints/restore', {
+        method: 'POST', body: JSON.stringify({ checkpoint_path: selected[0], destination_parent: selected[1] }),
+      })
+      setCheckpointNotice(`Đã khôi phục ${restored.repository_count} repositories và ${restored.worktree_count} worktrees tại ${restored.path}. Các task cần được kiểm tra trước khi chạy lại.`)
+    } catch (e) {
+      setCheckpointError(e instanceof Error ? e.message : 'Could not restore project checkpoint')
+    } finally { setCheckpointBusy(false) }
+  }
   if (error && !metrics) return <div className="panel"><div className="panel-heading"><div><h2>Không đọc được dung lượng</h2><p>{error}</p></div><button className="button secondary" onClick={onRefresh}>Thử lại</button></div></div>
   if (!metrics) return <div className="panel storage-loading">Đang đọc thống kê lưu trữ…</div>
   const categories = [['database','Cơ sở dữ liệu SQLite','File .sqlite3, WAL và shared memory'],['worktrees','Worktree & build','Mã nguồn task, thư mục .git và file build'],['handoffs','IDE handoff','Gói bàn giao cho Agent chạy thủ công'],['other','Dữ liệu khác','Các file/thư mục khác dưới data/']] as const
@@ -382,6 +452,16 @@ function StoragePage({metrics,error,busy,onRefresh}:{metrics:StorageMetrics|null
   return <div className="storage-page">
     <div className="storage-toolbar"><div><b>Thống kê trên máy này</b><small>Cập nhật {date(metrics.measured_at)}</small></div><button className="button secondary" onClick={onRefresh}>{busy ? 'Đang cập nhật…' : '⟳ Cập nhật'}</button></div>
     {volumeWarning !== 'ok' && <div className={`storage-alert ${volumeWarning}`}><b>{volumeWarning === 'critical' ? 'Ổ đĩa gần đầy' : 'Dung lượng ổ đĩa đang cao'}</b><span>Ổ đĩa đã dùng {metrics.disk.used_percent}%. Kiểm tra worktree và các file build trước khi tạo thêm task.</span></div>}
+    <section className="panel checkpoint-panel"><div className="panel-heading"><div><h2>Sao lưu và di chuyển dự án</h2><p>Xuất lịch sử, contracts, Git refs và repository bundles thành một file .devagent có kiểm tra SHA-256.</p></div><div className="checkpoint-actions">{isTauri() && <button className="button secondary" disabled={checkpointBusy} onClick={() => void restoreCheckpoint()}>{checkpointBusy ? 'Đang xử lý…' : 'Restore checkpoint'}</button>}<button className="button primary" disabled={checkpointBusy || !checkpointPreview || checkpointBlocked || (checkpointPreview?.active_tasks || 0) > 0} onClick={() => void exportCheckpoint()}>{checkpointBusy ? 'Đang tạo…' : 'Export checkpoint'}</button></div></div>
+      <div className="checkpoint-disclosure">Checkpoint chứa Git history và dữ liệu dự án riêng tư. API/provider credentials, executable argv và đường dẫn máy này được loại bỏ; repositories/agents cần cấu hình lại sau restore. Restore tạo profile mới cạnh dữ liệu hiện tại; task cũ ở trạng thái blocked và cần kiểm tra trước khi chạy tiếp. RAG indexes sẽ cần dựng lại từ repositories. Git history được quét secret trước khi đóng gói.</div>
+      {checkpointPreview && <><div className="checkpoint-summary"><b>{checkpointPreview.repositories.length} repositories</b><span>{checkpointPreview.active_tasks} active tasks</span><span>{checkpointDirtyCount} uncommitted paths</span></div>
+        {checkpointPreview.active_tasks > 0 && <div className="storage-alert warning"><b>Cần dừng task đang chạy</b><span>Checkpoint nhất quán chỉ được tạo khi không có task đang hoạt động.</span></div>}
+        {checkpointPreview.repositories.length > 0 && <div className="checkpoint-repositories">{checkpointPreview.repositories.map(repo => <div className="checkpoint-repo" key={repo.id}><b>{repo.name}</b><small>{repo.default_branch}{repo.remote ? ` · ${repo.remote}` : ''}</small>{repo.dirty_paths.length > 0 && <small>Thay đổi chưa commit: {repo.dirty_paths.join(', ')}</small>}{repo.worktrees.map(worktree => worktree.dirty_paths.length > 0 && <small key={worktree.task_id}>Task {worktree.task_id.slice(0,8)}: {worktree.dirty_paths.join(', ')}</small>)}{repo.secret_paths?.length ? <small className="checkpoint-danger">Có thể có secret trong file thay đổi: {repo.secret_paths.join(', ')}</small> : null}{repo.scan_error && <small className="checkpoint-danger">{repo.scan_error}</small>}</div>)}</div>}
+        <label className="checkpoint-option"><input type="checkbox" checked={includeUncommitted} onChange={event => setIncludeUncommitted(event.target.checked)}/><span><b>Include uncommitted files</b><small>Mặc định bỏ qua thay đổi chưa commit. Khi bật, file trong status Git sẽ được quét secret, symlink và file lớn sẽ bị từ chối.</small></span></label>
+        {!includeUncommitted && checkpointDirtyCount > 0 && <small className="checkpoint-muted">Các file thay đổi chưa commit sẽ không nằm trong checkpoint.</small>}
+      </>}
+      {checkpointError && <div className="storage-alert critical"><b>Không tạo được checkpoint</b><span>{checkpointError}</span></div>}{checkpointNotice && <div className="storage-alert warning"><b>Checkpoint</b><span>{checkpointNotice}</span></div>}
+    </section>
     <section className="storage-summary">
       <div className="storage-card"><small>DEVAGENT DATA</small><strong>{formatBytes(metrics.data_bytes)}</strong><span>Tổng dữ liệu Orchestrator đang quản lý</span></div>
       <div className="storage-card"><small>SQLITE</small><strong>{formatBytes(metrics.categories.database || 0)}</strong><span>{metrics.counts.tasks} task · {metrics.counts.events} sự kiện</span></div>

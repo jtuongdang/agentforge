@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-  devagent_orchestrator_lib::run();
+    devagent_orchestrator_lib::run();
 }
