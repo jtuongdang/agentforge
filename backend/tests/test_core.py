@@ -185,6 +185,8 @@ def test_project_guidance_loads_root_and_scoped_agent_instructions(tmp_path):
 
 def test_scope_check_handles_nested_globs_and_blocks_unlisted_paths():
     assert in_scope("clinic-application/src/main/Handler.java", ["clinic-application/src/**"])
+    assert in_scope("src/Root.py", ["src/**/*.py"])
+    assert in_scope("src/nested/Root.py", ["src/**/*.py"])
     assert check_scope(["clinic-application/src/Handler.java", "README.md"], ["clinic-application/src/**"]) == ["README.md"]
     assert not in_scope("../outside.txt", ["**/*"])
 
@@ -399,7 +401,7 @@ def test_db_schema_migration_is_versioned_and_backed_up(tmp_path, monkeypatch):
     db.init_db()
 
     with db.connect() as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 7
         assert "base_sha" in {row[1] for row in con.execute("PRAGMA table_info(tasks)")}
     backups = list((tmp_path / "backups").glob("pre-migration-v0-*.sqlite3"))
     assert len(backups) == 1
@@ -544,9 +546,19 @@ def test_provider_catalog_adapters_use_provider_specific_auth_and_models(tmp_pat
         checked = providers.check_connection(connection["id"])
         assert checked["state"] == "valid"
         assert checked["models"] == [fixtures[provider][1]]
+        providers.update_connection(connection["id"], model=fixtures[provider][1])
+        with db.connect() as con:
+            worker = con.execute("SELECT adapter,provider,available FROM agents WHERE id=?",
+                                  (f"provider-{connection['id']}",)).fetchone()
+        assert tuple(worker) == ("provider", provider, 1)
     ollama = providers.create_connection("ollama", "Local Ollama")
     checked = providers.check_connection(ollama["id"])
     assert checked["models"] == [fixtures["ollama"][1]]
+    providers.update_connection(ollama["id"], model=fixtures["ollama"][1])
+    with db.connect() as con:
+        worker = con.execute("SELECT provider,available FROM agents WHERE id=?",
+                             (f"provider-{ollama['id']}",)).fetchone()
+    assert tuple(worker) == ("ollama", 1)
 
 
 def test_provider_api_requires_local_token_and_never_returns_secret(tmp_path, monkeypatch):
@@ -575,6 +587,21 @@ def test_provider_api_requires_local_token_and_never_returns_secret(tmp_path, mo
         listed = client.get("/api/providers")
         assert listed.status_code == 200
         assert "sk-never-return-this" not in listed.text
+        with db.transaction() as con:
+            con.execute("INSERT INTO repositories(id,name,path) VALUES('provider-repo','Fixture',?)", (str(tmp_path),))
+            con.execute("""INSERT INTO tasks(id,title,objective,repository_id,file_globs,preferred_agent_id,status)
+                VALUES('active-provider-task','Active','Fixture objective','provider-repo','[\"**/*\"]',?,'running')""",
+                (response.json()["agent_id"],))
+        blocked_delete = client.delete(f"/api/providers/{response.json()['id']}")
+        assert blocked_delete.status_code == 409
+        assert client.get("/api/providers").json()[0]["id"] == response.json()["id"]
+        with db.transaction() as con:
+            con.execute("UPDATE tasks SET status='completed' WHERE id='active-provider-task'")
+        removed = client.delete(f"/api/providers/{response.json()['id']}")
+        assert removed.status_code == 204
+        with db.connect() as con:
+            agent = con.execute("SELECT enabled,available FROM agents WHERE id=?", (response.json()["agent_id"],)).fetchone()
+        assert tuple(agent) == (0, 0)
 
 
 def test_ollama_provider_rejects_non_loopback_endpoint():
@@ -598,6 +625,125 @@ def test_provider_credential_store_rejects_non_os_keyring(monkeypatch):
         providers._keyring()
 
 
+@pytest.mark.parametrize("provider", ["openai", "anthropic", "gemini", "ollama"])
+def test_provider_workers_use_native_tool_protocols_and_only_write_scoped_files(provider, tmp_path, monkeypatch):
+    import asyncio
+    from app import provider_worker
+
+    (tmp_path / "src").mkdir()
+    connection = {"id": "fixture", "provider": provider, "model": "model-fixture",
+                  "endpoint": "http://127.0.0.1:11434" if provider == "ollama" else "",
+                  "state": "valid", "models": '["model-fixture"]', "secret_ref": "secret-ref"}
+    monkeypatch.setattr(provider_worker, "_provider_request_details", lambda _id: (connection, "fixture-api-key"))
+    tool_args = {"path": "src/generated.py", "content": "VALUE = 7\n"}
+    if provider in {"openai", "ollama"}:
+        first = {"choices": [{"message": {"role": "assistant", "tool_calls": [{"id": "call-1", "type": "function",
+            "function": {"name": "write_file", "arguments": json.dumps(tool_args)}}]}}]}
+        final = {"choices": [{"message": {"role": "assistant", "content": "Implemented."}}]}
+    elif provider == "anthropic":
+        first = {"content": [{"type": "tool_use", "id": "call-1", "name": "write_file", "input": tool_args}],
+                 "stop_reason": "tool_use"}
+        final = {"content": [{"type": "text", "text": "Implemented."}], "stop_reason": "end_turn"}
+    else:
+        first = {"candidates": [{"content": {"role": "model", "parts": [{"functionCall": {
+            "id": "call-1", "name": "write_file", "args": tool_args}}]}, "finishReason": "STOP"}]}
+        final = {"candidates": [{"content": {"role": "model", "parts": [{"text": "Implemented."}]}, "finishReason": "STOP"}]}
+    responses = iter([first, final])
+    requests = []
+
+    async def fake_post(_client, url, headers, payload):
+        requests.append((url, headers, payload))
+        return next(responses)
+
+    monkeypatch.setattr(provider_worker, "_post_json", fake_post)
+    tool_events = []
+    code = asyncio.run(provider_worker.execute("fixture", "Implement the fixture change.", str(tmp_path),
+        ["src/**/*.py"], ["src/**/*.py"], on_tool=lambda *args: tool_events.append(args)))
+
+    assert code == 0
+    assert (tmp_path / "src" / "generated.py").read_text() == "VALUE = 7\n"
+    assert len(requests) == 2
+    assert "fixture-api-key" not in requests[0][0]
+    if provider == "openai":
+        assert requests[0][1]["Authorization"] == "Bearer fixture-api-key"
+        assert requests[0][2]["tools"][0]["function"]["name"] == "list_files"
+    elif provider == "anthropic":
+        assert requests[0][1]["x-api-key"] == "fixture-api-key"
+        assert requests[0][2]["tools"][0]["input_schema"]["type"] == "object"
+    elif provider == "gemini":
+        assert requests[0][1]["x-goog-api-key"] == "fixture-api-key"
+        assert "functionDeclarations" in requests[0][2]["tools"][0]
+    else:
+        assert requests[0][0] == "http://127.0.0.1:11434/api/chat"
+        assert requests[0][1].get("Authorization") is None
+    assert tool_events == [("write_file", "src/generated.py", True)]
+
+
+def test_provider_worker_rejects_out_of_scope_symlinks_and_secret_paths(tmp_path):
+    from app.provider_worker import ProviderWorkerError, _ScopedFiles
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / ".env").write_text("API_TOKEN=fixture-token-value", encoding="utf-8")
+    (tmp_path / "outside.txt").write_text("outside", encoding="utf-8")
+    (tmp_path / "src" / "nested").mkdir()
+    (tmp_path / "src" / "nested" / "linked.py").symlink_to(tmp_path / "outside.txt")
+    files = _ScopedFiles(str(tmp_path), ["src/**/*.py"], ["src/**/*.py"])
+    with pytest.raises(ProviderWorkerError, match="scope"):
+        files.read_file("outside.txt")
+    with pytest.raises(ProviderWorkerError, match="Credential"):
+        files.read_file(".env")
+    with pytest.raises(ProviderWorkerError, match="Symbolic links"):
+        files.read_file("src/nested/linked.py")
+    with pytest.raises(ProviderWorkerError, match="Secret scanner"):
+        files.write_file("src/generated.py", "api_key = 'fixture-secret-value-1234'\n")
+
+
+def test_cloud_provider_tasks_require_persisted_owner_consent_and_provider_agents_are_manual(tmp_path, monkeypatch):
+    from app.scheduler import TaskScheduler
+    from types import SimpleNamespace
+
+    repo = tmp_path / "provider-task-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "-m", "initial"], check=True, capture_output=True)
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-task.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path,default_branch) VALUES('repo','Fixture',?,'main')", (str(repo),))
+        con.execute("INSERT INTO provider_connections(id,provider,name,model,secret_ref,state,models) "
+                    "VALUES('provider-test','openai','Fixture','model-test','secret-ref','valid','[\"model-test\"]')")
+        con.execute("""INSERT INTO agents(id,name,adapter,provider,command,capabilities,file_globs,enabled,available)
+            VALUES('provider-agent','Fixture (openai)','provider','openai','[\"provider-test\"]',
+            '[\"implementation\"]','[\"**/*\"]',1,1)""")
+
+    with authenticated_test_client(monkeypatch) as client:
+        payload = {"title": "Provider task", "objective": "Make a bounded fixture implementation change.",
+                   "repository_id": "repo", "preferred_agent_id": "provider-agent",
+                   "required_capabilities": ["implementation"], "file_globs": ["src/**/*.py"]}
+        rejected = client.post("/api/tasks", json=payload)
+        assert rejected.status_code == 422
+        assert "consent" in rejected.json()["detail"].lower()
+        accepted = client.post("/api/tasks", json=payload | {"provider_data_consent": True})
+        assert accepted.status_code == 202, accepted.text
+        assert accepted.json()["provider_data_consent"] is True
+
+    provider_agent = {"id": "provider-agent", "adapter": "provider", "provider": "openai", "enabled": True,
+                      "available": True, "max_parallel": 1, "capabilities": ["implementation"]}
+    class FakeRegistry:
+        def list(self): return [provider_agent]
+    scheduler = TaskScheduler(SimpleNamespace(registry=FakeRegistry()))
+    task = {"id": "auto-task", "status": "queued", "repository_id": "repo", "base_branch": "main",
+            "file_globs": ["src/**/*.py"], "dependencies": [], "contract_id": None,
+            "required_capabilities": ["implementation"], "preferred_agent_id": None}
+    assert scheduler._choose_agent(task) is None
+    task["preferred_agent_id"] = "provider-agent"
+    assert scheduler._choose_agent(task) is provider_agent
+
+
 def test_provider_schema_upgrade_snapshots_version_five_database(tmp_path, monkeypatch):
     import sqlite3
 
@@ -619,7 +765,7 @@ def test_provider_schema_upgrade_snapshots_version_five_database(tmp_path, monke
         assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
                            "AND name='provider_connections'").fetchone()[0] == 0
     with db.connect() as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 7
         assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
                            "AND name='provider_connections'").fetchone()[0] == 1
 

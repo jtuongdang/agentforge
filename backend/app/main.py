@@ -293,6 +293,10 @@ def lead_handover(request: Request):
 @app.post("/api/lead/client/tasks", status_code=202)
 def lead_create_task(body: TaskCreate, request: Request):
     session = _lead_client_session(request, "task:create")
+    if body.preferred_agent_id:
+        agent = registry.get(body.preferred_agent_id)
+        if agent and agent["adapter"] == "provider":
+            raise HTTPException(403, "A Tech Lead session cannot grant provider data-transfer consent")
     task = create_task(body)
     db.event(task["id"], "tech_lead_task_created", "Task created by the active Tech Lead session.",
              {"session_id": session["id"], "client_id": session["client_id"]})
@@ -325,6 +329,7 @@ def decode_task(row: dict) -> dict:
     for key in ("required_capabilities", "file_globs", "dependencies", "validation", "acceptance_criteria"):
         row[key] = json.loads(row[key])
     row["pr_approved"] = bool(row["pr_approved"])
+    row["provider_data_consent"] = bool(row.get("provider_data_consent", 0))
     row["base_branch"] = row.get("base_branch") or row.get("repository_default_branch")
     return row
 
@@ -620,8 +625,20 @@ def check_provider_connection(connection_id: str):
 @app.delete("/api/providers/{connection_id}", status_code=204)
 def delete_provider_connection(connection_id: str):
     try:
+        agent_id = f"provider-{connection_id}"
+        with db.connect() as con:
+            active = con.execute("""SELECT id,title,status FROM tasks
+                WHERE status IN ('queued','planning','waiting_for_contract','waiting_for_scope','assigned','running','validating',
+                    'recovering','handoff_ready','awaiting_pr_approval','publishing')
+                  AND (assigned_agent_id=? OR preferred_agent_id=?) ORDER BY created_at""",
+                (agent_id, agent_id)).fetchall()
+        if active:
+            raise HTTPException(409, {"message": "Provider worker has active tasks; finish or cancel them before removal.",
+                                      "tasks": [dict(row) for row in active]})
         if not providers.delete_connection(connection_id):
             raise HTTPException(404, "Provider connection not found")
+    except HTTPException:
+        raise
     except providers.ProviderError as exc:
         raise HTTPException(503, str(exc)) from exc
     return None
@@ -788,6 +805,15 @@ def create_task(body: TaskCreate):
             raise HTTPException(422, "Preferred agent is unknown or disabled")
         if not set(body.required_capabilities).issubset(set(agent["capabilities"])):
             raise HTTPException(422, "Preferred agent does not advertise the requested capabilities")
+        if agent["adapter"] == "provider":
+            connection_id = (agent.get("command") or [None])[0]
+            connection = providers.get_connection(connection_id) if connection_id else None
+            if not connection:
+                raise HTTPException(422, "Provider connection for this agent is unavailable")
+            if connection["provider"] != "ollama" and not body.provider_data_consent:
+                raise HTTPException(422, "Explicit consent is required to send scoped task content to this cloud provider")
+            if not agent["available"]:
+                raise HTTPException(422, "Provider worker is unavailable; check its credential and select a supported model")
     if body.contract_id:
         with db.connect() as con:
             contract = con.execute("SELECT state FROM contracts WHERE id=?", (body.contract_id,)).fetchone()
@@ -808,14 +834,15 @@ def create_task(body: TaskCreate):
     task_id = str(uuid.uuid4())
     with db.transaction() as con:
         con.execute("""INSERT INTO tasks(id,title,objective,acceptance_criteria,priority,repository_id,base_branch,base_sha,required_capabilities,file_globs,dependencies,
-            contract_id,preferred_agent_id,max_retries) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            contract_id,preferred_agent_id,provider_data_consent,max_retries) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (task_id, planned.title, planned.objective, db.dumps(body.acceptance_criteria), body.priority,
              body.repository_id, base_branch, base_sha, db.dumps(planned.required_capabilities), db.dumps(planned.file_globs),
-             db.dumps(body.dependencies), body.contract_id, body.preferred_agent_id, body.max_retries))
+             db.dumps(body.dependencies), body.contract_id, body.preferred_agent_id,
+             int(body.provider_data_consent), body.max_retries))
     db.event(task_id, "queued", "Task accepted by planner and queued for capability matching.",
              {"allowed_globs": body.file_globs, "required_capabilities": body.required_capabilities,
               "acceptance_criteria_count": len(body.acceptance_criteria), "priority": body.priority,
-              "base_branch": base_branch})
+              "base_branch": base_branch, "provider_data_consent": body.provider_data_consent})
     return task_row(task_id)
 
 

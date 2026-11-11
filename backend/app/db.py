@@ -60,7 +60,7 @@ def backup_before_migration() -> Path | None:
     with sqlite3.connect(DB_PATH, timeout=20) as source:
         version = source.execute("PRAGMA user_version").fetchone()[0]
         tables = source.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
-        if version >= 6 or tables == 0:
+        if version >= 7 or tables == 0:
             return None
         backup_dir = DB_PATH.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -82,6 +82,7 @@ def init_db() -> None:
         );
         CREATE TABLE IF NOT EXISTS agents (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, adapter TEXT NOT NULL,
+            provider TEXT,
             command TEXT, capabilities TEXT NOT NULL DEFAULT '[]', file_globs TEXT NOT NULL DEFAULT '["**/*"]',
             max_parallel INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1,
             available INTEGER NOT NULL DEFAULT 0, availability_note TEXT NOT NULL DEFAULT '',
@@ -99,7 +100,9 @@ def init_db() -> None:
             status TEXT NOT NULL DEFAULT 'queued',
             required_capabilities TEXT NOT NULL DEFAULT '[]', file_globs TEXT NOT NULL,
             dependencies TEXT NOT NULL DEFAULT '[]', contract_id TEXT REFERENCES contracts(id),
-            preferred_agent_id TEXT REFERENCES agents(id), assigned_agent_id TEXT REFERENCES agents(id),
+            preferred_agent_id TEXT REFERENCES agents(id),
+            provider_data_consent INTEGER NOT NULL DEFAULT 0,
+            assigned_agent_id TEXT REFERENCES agents(id),
             branch TEXT, worktree TEXT, retries INTEGER NOT NULL DEFAULT 0, max_retries INTEGER NOT NULL DEFAULT 2,
             validation TEXT NOT NULL DEFAULT '{}', pr_url TEXT, pr_approved INTEGER NOT NULL DEFAULT 0,
             error TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -160,6 +163,7 @@ def init_db() -> None:
             "priority": "TEXT NOT NULL DEFAULT 'normal'",
             "base_branch": "TEXT",
             "base_sha": "TEXT",
+            "provider_data_consent": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, declaration in task_migrations.items():
             if name not in task_columns:
@@ -174,6 +178,7 @@ def init_db() -> None:
                 con.execute(f"ALTER TABLE repositories ADD COLUMN {name} {declaration}")
         columns = {row[1] for row in con.execute("PRAGMA table_info(agents)").fetchall()}
         migrations = {
+            "provider": "TEXT",
             "credential_status": "TEXT NOT NULL DEFAULT 'unchecked'",
             "credential_checked_at": "TEXT",
             "credential_note": "TEXT NOT NULL DEFAULT ''",
@@ -182,7 +187,7 @@ def init_db() -> None:
         for name, declaration in migrations.items():
             if name not in columns:
                 con.execute(f"ALTER TABLE agents ADD COLUMN {name} {declaration}")
-        con.execute("PRAGMA user_version=6")
+        con.execute("PRAGMA user_version=7")
 
 
 def event(task_id: str | None, kind: str, message: str, details: Any = None, agent_id: str | None = None) -> None:

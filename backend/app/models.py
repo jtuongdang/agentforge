@@ -104,6 +104,7 @@ class TaskCreate(BaseModel):
     dependencies: list[str] = Field(default_factory=list)
     contract_id: str | None = None
     preferred_agent_id: str | None = None
+    provider_data_consent: bool = False
     max_retries: int = Field(default=2, ge=0, le=2)
 
     @field_validator("file_globs")

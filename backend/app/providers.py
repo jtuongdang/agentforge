@@ -160,7 +160,45 @@ def _metadata(row) -> dict:
     result = dict(row)
     result["models"] = json.loads(result.pop("models", "[]"))
     result["has_credential"] = bool(result.pop("secret_ref", None))
+    result["agent_id"] = f"provider-{result['id']}"
     return result
+
+
+def _sync_worker_agent(connection_id: str) -> None:
+    current = _raw_connection(connection_id)
+    if current is None:
+        return
+    current = dict(current)
+    models = json.loads(current["models"] or "[]")
+    enabled_model = current["state"] == "valid" and current["model"] in models
+    credential_available = True
+    if enabled_model and current["provider"] != "ollama":
+        try:
+            credential_available = bool(current["secret_ref"] and
+                _keyring().get_password(SERVICE_NAME, current["secret_ref"]))
+        except ProviderError:
+            credential_available = False
+    enabled_model = enabled_model and credential_available
+    if not current["model"]:
+        note = "Choose a model after checking the provider connection."
+    elif not credential_available:
+        note = "Provider credential is missing from the approved OS credential store."
+    elif current["state"] != "valid":
+        note = "Check the provider connection before scheduling this worker."
+    elif current["model"] not in models:
+        note = "The selected model is not in the latest supported model list."
+    else:
+        note = "Provider worker is available; it only runs when explicitly selected for a task."
+    with db.transaction() as con:
+        con.execute("""INSERT INTO agents(id,name,adapter,provider,command,capabilities,file_globs,max_parallel,
+            enabled,available,availability_note) VALUES(?,?,?,?,?,?,?,?,1,?,?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name,adapter=excluded.adapter,provider=excluded.provider,
+            command=excluded.command,capabilities=excluded.capabilities,file_globs=excluded.file_globs,
+            available=excluded.available,availability_note=excluded.availability_note""",
+            (f"provider-{connection_id}", f"{current['name']} ({current['provider']})", "provider",
+             current["provider"], db.dumps([connection_id]),
+             db.dumps(["analysis", "implementation", "documentation", "refactoring", "testing"]),
+             db.dumps(["**/*"]), 1, int(enabled_model), note))
 
 
 def list_connections() -> list[dict]:
@@ -211,6 +249,7 @@ def create_connection(provider: str, name: str, model: str = "", api_key: str | 
         if isinstance(exc, ProviderError):
             raise
         raise ProviderError("Could not save the provider connection") from exc
+    _sync_worker_agent(connection_id)
     return get_connection(connection_id)
 
 
@@ -250,6 +289,7 @@ def update_connection(connection_id: str, *, name: str | None = None, model: str
             except Exception:
                 pass
         raise ProviderError("Could not update the provider connection") from exc
+    _sync_worker_agent(connection_id)
     return get_connection(connection_id)
 
 
@@ -265,6 +305,8 @@ def delete_connection(connection_id: str) -> bool:
             raise ProviderError("Could not remove the credential from the operating-system store") from exc
     with db.transaction() as con:
         con.execute("DELETE FROM provider_connections WHERE id=?", (connection_id,))
+        con.execute("UPDATE agents SET enabled=0,available=0,availability_note=? WHERE id=?",
+                    ("Provider connection was removed.", f"provider-{connection_id}"))
     return True
 
 
@@ -308,8 +350,16 @@ def check_connection(connection_id: str) -> dict:
         try:
             api_key = _keyring().get_password(SERVICE_NAME, current["secret_ref"])
         except Exception as exc:
+            with db.transaction() as con:
+                con.execute("UPDATE provider_connections SET state='unavailable',models='[]',checked_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                            (datetime.now(timezone.utc).isoformat(timespec="seconds"), connection_id))
+            _sync_worker_agent(connection_id)
             raise ProviderError("Could not read the provider credential from the operating-system store") from exc
         if not api_key:
+            with db.transaction() as con:
+                con.execute("UPDATE provider_connections SET state='unavailable',models='[]',checked_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                            (datetime.now(timezone.utc).isoformat(timespec="seconds"), connection_id))
+            _sync_worker_agent(connection_id)
             raise ProviderError("Provider credential is missing from the operating-system store")
     try:
         models = _request_models(current["provider"], current["endpoint"], api_key)
@@ -317,8 +367,10 @@ def check_connection(connection_id: str) -> dict:
         with db.transaction() as con:
             con.execute("UPDATE provider_connections SET state='invalid',models='[]',checked_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                         (datetime.now(timezone.utc).isoformat(timespec="seconds"), connection_id))
+        _sync_worker_agent(connection_id)
         raise exc
     with db.transaction() as con:
         con.execute("UPDATE provider_connections SET state='valid',models=?,checked_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                     (db.dumps(models), datetime.now(timezone.utc).isoformat(timespec="seconds"), connection_id))
+    _sync_worker_agent(connection_id)
     return get_connection(connection_id)

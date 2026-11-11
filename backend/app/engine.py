@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import db
 from . import code_context
+from . import provider_worker
 from .git_ops import repository
 from .fleet import credential_key, set_credential_cooldown, transfer_task_to_rescue
 from .recovery import RecoveryManager
@@ -51,7 +52,7 @@ def get_task(task_id: str) -> dict | None:
     task = dict(row)
     for key in ("required_capabilities", "file_globs", "dependencies", "validation", "acceptance_criteria"):
         task[key] = json.loads(task[key])
-    for key in ("pr_approved",):
+    for key in ("pr_approved", "provider_data_consent"):
         task[key] = bool(task[key])
     return task
 
@@ -317,6 +318,26 @@ class AgentExecutionEngine:
     async def _invoke(self, agent: dict, worktree: str, task_file: Path, prompt: str, task_id: str,
                       file_globs: list[str] | None = None, on_output=None) -> int:
         command = agent["command"]
+        if agent["adapter"] == "provider":
+            if not command:
+                raise RuntimeError("Provider worker has no linked connection")
+            current_task = get_task(task_id)
+            if not current_task:
+                raise RuntimeError("Provider worker task no longer exists")
+            if agent.get("provider") != "ollama" and not current_task.get("provider_data_consent"):
+                raise RuntimeError("Cloud provider execution requires explicit task data-transfer consent")
+
+            def provider_tool_event(name: str, path: str | None, written: bool) -> None:
+                label = f" {path}" if path else ""
+                action = "wrote" if written else "called"
+                message = f"Provider worker {action} {name}{label}."
+                if on_output:
+                    on_output(message)
+                log_event(task_id, "provider_tool", message,
+                          {"tool": name, "path": path, "written": written}, agent_id=agent["id"])
+
+            return await provider_worker.execute(command[0], prompt, worktree, file_globs or [],
+                                                 agent.get("file_globs") or [], on_tool=provider_tool_event)
         if agent["adapter"] == "codex":
             executable = command[0] if command else shutil.which("codex")
             args = [executable, "exec", "--json", "--color", "never", "--cd", worktree,

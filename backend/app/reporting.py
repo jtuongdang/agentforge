@@ -42,4 +42,5 @@ class ReportingManager:
             task[key] = json.loads(task[key])
         task["base_branch"] = task.get("base_branch") or task.get("repository_default_branch")
         task["pr_approved"] = bool(task["pr_approved"])
+        task["provider_data_consent"] = bool(task.get("provider_data_consent", 0))
         return task

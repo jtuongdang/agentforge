@@ -150,7 +150,9 @@ class TaskScheduler:
                 set_task(task["id"], "waiting_for_contract")
                 return None
         candidates = [agent for agent in self.registry.list()
-                      if agent["enabled"] and set(task["required_capabilities"]).issubset(agent["capabilities"])]
+                      if agent["enabled"]
+                      and (agent["adapter"] != "provider" or agent["id"] == task.get("preferred_agent_id"))
+                      and set(task["required_capabilities"]).issubset(agent["capabilities"])]
         if task["preferred_agent_id"]:
             candidates.sort(key=lambda agent: agent["id"] != task["preferred_agent_id"])
         for agent in candidates:

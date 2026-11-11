@@ -61,9 +61,17 @@ def in_scope(path: str, globs: list[str]) -> bool:
     if normalized.startswith("/") or ".." in normalized.split("/") or ".git" in normalized.split("/"):
         return False
     normalized = normalized.removeprefix("./")
-    return any(pattern in {"**", "**/*"} or fnmatch.fnmatchcase(normalized, pattern) or
-               (pattern.startswith("**/") and fnmatch.fnmatchcase(normalized, pattern[3:]))
-               for pattern in globs)
+    for pattern in globs:
+        if pattern in {"**", "**/*"} or fnmatch.fnmatchcase(normalized, pattern):
+            return True
+        if pattern.startswith("**/") and fnmatch.fnmatchcase(normalized, pattern[3:]):
+            return True
+        optional_recursive = pattern
+        while "/**/" in optional_recursive:
+            optional_recursive = optional_recursive.replace("/**/", "/", 1)
+            if fnmatch.fnmatchcase(normalized, optional_recursive):
+                return True
+    return False
 
 
 def check_scope(paths: list[str], globs: list[str]) -> list[str]:
