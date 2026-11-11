@@ -100,13 +100,68 @@ def test_tech_lead_pairing_scopes_lease_heartbeat_and_revoke(tmp_path, monkeypat
         tech_lead.handshake(other["pairing_code"], "client-2", "Other Lead")
     with pytest.raises(ValueError):
         tech_lead.create_pairing(["task:publish"])
-
     assert tech_lead.revoke(session["session_id"]) is True
     assert tech_lead.status()["connected"] is False
     assert tech_lead.authorize(session["access_token"]) is None
 
 
+def test_local_tech_lead_bridge_is_loopback_only_and_keeps_token_in_memory():
+    import importlib.util
+    from pathlib import Path
+    import httpx
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "tech_lead_bridge.py"
+    spec = importlib.util.spec_from_file_location("tech_lead_bridge_fixture", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    requests = []
+    def respond(request):
+        requests.append(request)
+        if request.url.path == "/api/lead/handshake":
+            return httpx.Response(201, json={"session_id": "session-fixture", "access_token": "ephemeral-fixture-token",
+                "client_id": "fixture-client", "client_name": "Fixture Lead", "scopes": list(module.DEFAULT_SCOPES),
+                "session_expires_at": "later", "heartbeat_interval_seconds": 30})
+        if request.url.path.endswith("/heartbeat"):
+            return httpx.Response(200, json={"session_id": "session-fixture", "lease_expires_at": "later"})
+        if request.url.path.endswith("/handover"):
+            return httpx.Response(200, json={"tasks": [], "contracts": []})
+        if request.url.path.endswith("/tasks"):
+            return httpx.Response(202, json={"id": "d9428888-122b-11e1-b85c-61cd3cbb3210", "status": "queued"})
+        if request.url.path.endswith("/diff"):
+            return httpx.Response(200, json={"diff": "fixture diff"})
+        if request.url.path.endswith("/reviews"):
+            return httpx.Response(201, json={"id": "review-fixture", "decision": "comment"})
+        return httpx.Response(404, json={"detail": "not found"})
+
+    transport = httpx.MockTransport(respond)
+    bridge = module.TechLeadBridge("http://127.0.0.1:43123", transport=transport)
+    try:
+        session = bridge.pair("one-time-fixture-code-value")
+        assert "access_token" not in session
+        assert "ephemeral-fixture-token" not in repr(session)
+        assert bridge.heartbeat()["session_id"] == "session-fixture"
+        assert bridge.handover()["tasks"] == []
+        task_id = "d9428888-122b-11e1-b85c-61cd3cbb3210"
+        assert bridge.create_task({"title": "Fixture", "objective": "Exercise bridge fixture"})["id"] == task_id
+        assert bridge.task_diff(task_id)["diff"] == "fixture diff"
+        assert bridge.review(task_id, "comment", "Checked")["decision"] == "comment"
+        with pytest.raises(module.BridgeError, match="Task id"):
+            bridge.task_diff("../../api/fleet")
+        assert requests[0].headers.get("authorization") is None
+        assert all(req.headers.get("authorization") == "Bearer ephemeral-fixture-token" for req in requests[1:])
+    finally:
+        bridge.close()
+    with pytest.raises(module.BridgeError, match="loopback"):
+        module.TechLeadBridge("https://example.com")
+    with pytest.raises(module.BridgeError, match="URL is invalid"):
+        module.TechLeadBridge("http://127.0.0.1:invalid")
+
+
 def test_tech_lead_api_uses_separate_scoped_token_and_audits_reviews(tmp_path, monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    import httpx
     from app import tech_lead
 
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "lead-api.sqlite3")
@@ -125,27 +180,44 @@ def test_tech_lead_api_uses_separate_scoped_token_and_audits_reviews(tmp_path, m
     client = authenticated_test_client(monkeypatch)
     pairing = client.post("/api/lead/pairing", json={"scopes": ["handover:read", "task:create", "task:review"]})
     assert pairing.status_code == 201
-    handshake = client.post("/api/lead/handshake", json={"pairing_code": pairing.json()["pairing_code"],
-        "client_id": "fixture-client", "client_name": "Fixture Lead"})
-    assert handshake.status_code == 201
-    lead_token = handshake.json()["access_token"]
-    lead_headers = {"Authorization": f"Bearer {lead_token}"}
-    assert client.get("/api/lead/client/handover", headers=lead_headers).status_code == 200
-    assert client.get("/api/fleet", headers=lead_headers).status_code == 401
+    script = Path(__file__).resolve().parents[2] / "scripts" / "tech_lead_bridge.py"
+    spec = importlib.util.spec_from_file_location("tech_lead_bridge_api_fixture", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    bridge_http_client = TestClient(app)
 
-    created = client.post("/api/lead/client/tasks", headers=lead_headers, json={
-        "title": "Scoped lead task", "objective": "Create a fixture task under lead scope.", "repository_id": "r",
+    class TestClientTransport(httpx.BaseTransport):
+        def handle_request(self, request):
+            response = bridge_http_client.request(request.method, str(request.url), content=request.content,
+                                                  headers=dict(request.headers))
+            return httpx.Response(response.status_code,
+                headers={"content-type": response.headers.get("content-type", "application/json")},
+                content=response.content, request=request)
+
+    bridge = module.TechLeadBridge("http://127.0.0.1:43123", client_id="fixture-client",
+                                   client_name="Fixture Lead", transport=TestClientTransport())
+    session = bridge.pair(pairing.json()["pairing_code"])
+    assert "access_token" not in session
+    assert bridge.handover()["tasks"] == []
+    bridge_headers = {"Authorization": f"Bearer {bridge._token}"}
+    assert bridge_http_client.get("/api/fleet", headers=bridge_headers).status_code == 401
+
+    created = bridge.create_task({"title": "Scoped lead task",
+        "objective": "Create a fixture task under lead scope.", "repository_id": "r",
         "file_globs": ["README.md"], "required_capabilities": ["implementation"]})
-    assert created.status_code == 202, created.text
-    task_id = created.json()["id"]
-    review = client.post(f"/api/lead/client/tasks/{task_id}/reviews", headers=lead_headers,
-                         json={"decision": "request_changes", "comments": "Clarify expected behavior."})
-    assert review.status_code == 201
+    assert created["status"] == "queued"
+    task_id = created["id"]
+    assert any(item["id"] == task_id for item in bridge.handover()["tasks"])
+    review = bridge.review(task_id, "request_changes", "Clarify expected behavior.")
+    assert review["decision"] == "request_changes"
     assert client.get(f"/api/tasks/{task_id}/reviews").json()[0]["decision"] == "request_changes"
 
-    revoked = client.post(f"/api/lead/sessions/{handshake.json()['session_id']}/revoke")
+    revoked = client.post(f"/api/lead/sessions/{session['session_id']}/revoke")
     assert revoked.status_code == 200
-    assert client.post("/api/lead/client/heartbeat", headers=lead_headers).status_code == 401
+    with pytest.raises(module.BridgeError, match="HTTP 401"):
+        bridge.heartbeat()
+    bridge.close()
+    assert bridge._token is None
 
 
 def test_task_planner_keeps_the_declared_file_boundary():

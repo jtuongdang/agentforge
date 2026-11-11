@@ -275,7 +275,7 @@ def lead_heartbeat(request: Request):
 @app.get("/api/lead/client/handover")
 def lead_handover(request: Request):
     _lead_client_session(request, "handover:read")
-    statuses = ("planning", "assigned", "running", "validating", "recovering", "handoff_ready",
+    statuses = ("queued", "planning", "assigned", "running", "validating", "recovering", "handoff_ready",
                 "awaiting_pr_approval", "publishing", "waiting_for_contract", "waiting_for_scope")
     marks = ",".join("?" for _ in statuses)
     with db.connect() as con:
