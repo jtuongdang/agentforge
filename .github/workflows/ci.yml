@@ -10,6 +10,17 @@ permissions:
   contents: read
 
 jobs:
+  windows-process-tree:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - run: python -m pip install -r backend/requirements-dev.txt
+      - run: python -m pytest backend/tests/test_core.py -k "terminate_process_tree or descendants_after_worker_exits" -q
   backend:
     runs-on: ubuntu-latest
     steps:

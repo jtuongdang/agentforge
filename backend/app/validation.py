@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import asyncio
 from pathlib import Path
-from .processes import process_group_options, terminate_process_tree
+from .processes import create_managed_process, process_group_options, terminate_process_tree
 
 SECRET_PATTERNS = [
     # Match literal values assigned to credential-like keys. Do not treat normal
@@ -126,7 +126,7 @@ async def run_configured_validation(worktree: str, command: list[str], log) -> d
                 "exit_code": None, "summary": "Custom validation command is empty."}
     log("validation", "Running the repository's configured validation command (argv, without a shell).")
     try:
-        proc = await asyncio.create_subprocess_exec(*command, cwd=worktree,
+        proc = await create_managed_process(*command, cwd=worktree,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=os.environ.copy(),
             **process_group_options())
     except OSError:
@@ -152,6 +152,7 @@ async def run_configured_validation(worktree: str, command: list[str], log) -> d
     reader = asyncio.create_task(stream())
     try:
         code = await asyncio.wait_for(proc.wait(), timeout=1200)
+        await terminate_process_tree(proc, grace_seconds=0.25)
         await reader
     except asyncio.TimeoutError:
         await terminate_process_tree(proc)
@@ -183,7 +184,7 @@ async def run_maven_verify(worktree: str, log) -> dict:
     log("validation", f"Running {' '.join(command[-2:])}")
     env = {**os.environ, "MAVEN_OPTS": os.getenv("MAVEN_OPTS", "-Xmx1g")}
     try:
-        proc = await asyncio.create_subprocess_exec(*command, cwd=worktree,
+        proc = await create_managed_process(*command, cwd=worktree,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=env,
             **process_group_options())
         chunks: list[str] = []
@@ -198,6 +199,7 @@ async def run_maven_verify(worktree: str, log) -> dict:
         reader = asyncio.create_task(stream())
         try:
             code = await asyncio.wait_for(proc.wait(), timeout=1200)
+            await terminate_process_tree(proc, grace_seconds=0.25)
             await reader
         except asyncio.TimeoutError:
             await terminate_process_tree(proc)

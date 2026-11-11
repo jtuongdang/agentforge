@@ -18,7 +18,7 @@ from .validation import ValidationEngine
 from .worktrees import GitWorktreeManager
 from .planner import TaskPlanner
 from .project_guidance import load_project_guidance
-from .processes import process_group_options, terminate_process_tree
+from .processes import create_managed_process, process_group_options, terminate_process_tree
 from .registry import AgentRegistry
 from .writer_leases import WriterLeaseManager
 
@@ -401,7 +401,7 @@ class AgentExecutionEngine:
             raise RuntimeError("The handoff adapter cannot execute as a local CLI")
         log_event(task_id, "agent_started", f"Starting adapter {agent['adapter']}.", agent_id=agent["id"])
         try:
-            proc = await asyncio.create_subprocess_exec(*args, cwd=worktree,
+            proc = await create_managed_process(*args, cwd=worktree,
                 stdin=asyncio.subprocess.PIPE if stdin_text else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                 limit=8 * 1024 * 1024, **process_group_options())

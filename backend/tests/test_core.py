@@ -2070,13 +2070,9 @@ def test_scheduler_dependency_requires_commit_in_selected_base(monkeypatch):
 
 def test_terminate_process_tree_stops_child_process(tmp_path):
     import asyncio
-    import os
     import sys
     import time
-    from app.processes import process_group_options, terminate_process_tree
-
-    if os.name != "posix":
-        pytest.skip("Process group termination assertion currently targets POSIX")
+    from app.processes import create_managed_process, process_group_options, terminate_process_tree
     ready = tmp_path / "child-ready"
     marker = tmp_path / "child-survived"
     child_code = ("import pathlib,time; pathlib.Path(%r).write_text('ready'); "
@@ -2084,13 +2080,13 @@ def test_terminate_process_tree_stops_child_process(tmp_path):
     parent_code = ("import subprocess,sys; subprocess.Popen([sys.executable,'-c',%r])") % child_code
 
     async def scenario():
-        process = await asyncio.create_subprocess_exec(sys.executable, "-c", parent_code, **process_group_options())
+        process = await create_managed_process(sys.executable, "-c", parent_code, **process_group_options())
         deadline = time.monotonic() + 5
         while not ready.exists() and time.monotonic() < deadline:
             await asyncio.sleep(0.02)
         assert ready.exists(), "child failed to start"
         await process.wait()  # The group leader may exit while the descendant remains alive.
-        await terminate_process_tree(process, grace_seconds=0.5)
+        await terminate_process_tree(process, grace_seconds=0.2)
         await asyncio.sleep(0.7)
         assert not marker.exists(), "child outlived its process group"
 
@@ -2099,12 +2095,9 @@ def test_terminate_process_tree_stops_child_process(tmp_path):
 
 def test_agent_invoke_stops_descendants_after_worker_exits(tmp_path, monkeypatch):
     import asyncio
-    import os
     import sys
     from app.engine import AgentExecutionEngine
 
-    if os.name != "posix":
-        pytest.skip("Process group termination assertion currently targets POSIX")
     marker = tmp_path / "orphan-wrote-after-worker-exit"
     child_code = ("import pathlib,time; time.sleep(0.7); pathlib.Path(%r).write_text('survived')") % str(marker)
     parent_code = ("import subprocess,sys; subprocess.Popen([sys.executable,'-c',%r], "
