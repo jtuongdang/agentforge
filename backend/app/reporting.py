@@ -10,8 +10,10 @@ class ReportingManager:
         with db.connect() as con:
             rows = con.execute("""SELECT t.*,r.name repository_name,r.remote repository_remote,
                 r.default_branch repository_default_branch,r.validation_profile repository_validation_profile,
-                r.validation_command repository_validation_command,a.name agent_name FROM tasks t
+                r.validation_command repository_validation_command,a.name agent_name,
+                wl.state writer_lease_state,wl.run_id writer_lease_run_id,wl.agent_id writer_lease_agent_id FROM tasks t
                 JOIN repositories r ON r.id=t.repository_id LEFT JOIN agents a ON a.id=t.assigned_agent_id
+                LEFT JOIN task_writer_leases wl ON wl.task_id=t.id
                 ORDER BY t.created_at DESC LIMIT ?""", (max(1, min(500, limit)),)).fetchall()
         return [self._decode(dict(row)) for row in rows]
 

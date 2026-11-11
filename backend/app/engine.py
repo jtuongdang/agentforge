@@ -17,6 +17,7 @@ from .planner import TaskPlanner
 from .project_guidance import load_project_guidance
 from .processes import process_group_options, terminate_process_tree
 from .registry import AgentRegistry
+from .writer_leases import WriterLeaseManager
 
 REDACTIONS = [
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"), "[REDACTED_GITHUB_TOKEN]"),
@@ -102,6 +103,13 @@ class AgentExecutionEngine:
 
             validation = {}
             last_error = None
+            lease_id: str | None = None
+
+            def release_writer() -> None:
+                nonlocal lease_id
+                if lease_id:
+                    WriterLeaseManager.release(task_id, lease_id)
+                    lease_id = None
 
             def finish_failed_run(run_id: str, code: int, error: str, result: dict,
                                   output_tail: list[str], checkpoint: dict | None = None):
@@ -119,6 +127,17 @@ class AgentExecutionEngine:
                 with db.transaction() as con:
                     con.execute("INSERT INTO runs(id,task_id,agent_id,state) VALUES(?,?,?,'running')",
                                 (run_id, task_id, agent["id"]))
+                candidate_lease = str(uuid.uuid4())
+                if not WriterLeaseManager.acquire(task_id, run_id, agent["id"], candidate_lease):
+                    message = "Task worktree already has an active or orphaned writer lease; no worker was started."
+                    with db.transaction() as con:
+                        con.execute("UPDATE runs SET state='blocked',exit_code=125,finished_at=CURRENT_TIMESTAMP,report=? WHERE id=?",
+                                    (db.dumps({"error": message, "failure_class": "writer_lease_conflict"}), run_id))
+                    validation = {"passed": False, "blocked": True, "reason": "writer_lease_conflict"}
+                    last_error = message
+                    log_event(task_id, "writer_lease_conflict", message, agent_id=agent["id"])
+                    break
+                lease_id = candidate_lease
                 prompt = task_content
                 if last_error:
                     prompt += f"\n\nRepair attempt {attempt}: previous validation failed:\n{last_error}\nFix this and re-run the relevant checks."
@@ -145,6 +164,7 @@ class AgentExecutionEngine:
                         last_error = (f"Changes outside declared file scope: {', '.join(outside)}" if outside else
                                       f"Possible secret content in changed files: {', '.join(secret_files)}")
                         finish_failed_run(run_id, code, last_error, validation, output_tail, checkpoint)
+                        release_writer()
                         break
                 else:
                     paths = await asyncio.to_thread(self.worktrees.changed_paths, worktree,
@@ -159,11 +179,13 @@ class AgentExecutionEngine:
                                       "paths": outside}
                         last_error = f"Changes outside declared file scope: {', '.join(validation['paths'])}"
                         finish_failed_run(run_id, code, last_error, validation, output_tail, checkpoint)
+                        release_writer()
                         break
                     if secret_files:
                         validation = {"passed": False, "blocked": True, "reason": "possible_secret", "paths": secret_files}
                         last_error = f"Possible secret content in changed files: {', '.join(secret_files)}"
                         finish_failed_run(run_id, code, last_error, validation, output_tail, checkpoint)
+                        release_writer()
                         break
                     set_task(task_id, "validating")
                     if self.build_slots:
@@ -186,12 +208,15 @@ class AgentExecutionEngine:
                         with db.transaction() as con:
                             con.execute("UPDATE runs SET state='passed',exit_code=0,finished_at=CURRENT_TIMESTAMP,report=? WHERE id=?",
                                         (db.dumps(validation), run_id))
+                        release_writer()
                         return
                     last_error = validation.get("summary", "Validation failed")
                     if validation.get("blocked"):
                         finish_failed_run(run_id, code, last_error, validation, output_tail, checkpoint)
+                        release_writer()
                         break
                 failure = finish_failed_run(run_id, code, last_error or "", validation, output_tail, checkpoint)
+                release_writer()
                 if (failure.retryable and
                         self.recovery.should_retry(attempt, task["max_retries"], bool(validation.get("blocked")))):
                     delay = self.recovery.backoff_seconds(attempt, failure.retry_after_seconds)
@@ -209,10 +234,14 @@ class AgentExecutionEngine:
                      finished_at=datetime.now(timezone.utc).isoformat())
             log_event(task_id, final_status, last_error or "Task failed.", validation, agent["id"])
         except asyncio.CancelledError:
+            if 'release_writer' in locals():
+                release_writer()
             set_task(task_id, "cancelled", error="Stopped by operator; worktree retained for review.",
                      finished_at=datetime.now(timezone.utc).isoformat())
             raise
         except Exception as exc:
+            if 'release_writer' in locals():
+                release_writer()
             message = redact(str(exc))
             set_task(task_id, "failed", error=message, finished_at=datetime.now(timezone.utc).isoformat())
             log_event(task_id, "failed", message, agent_id=agent["id"])

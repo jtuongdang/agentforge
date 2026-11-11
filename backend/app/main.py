@@ -96,7 +96,7 @@ def reconcile_interrupted_tasks() -> None:
     interrupted = ("planning", "assigned", "running", "validating", "recovering", "publishing")
     with db.transaction() as con:
         marks = ",".join("?" for _ in interrupted)
-        rows = con.execute(f"SELECT id,status,assigned_agent_id FROM tasks WHERE status IN ({marks})", interrupted).fetchall()
+        rows = con.execute(f"SELECT id,status,assigned_agent_id,worktree FROM tasks WHERE status IN ({marks})", interrupted).fetchall()
         for task in rows:
             publishing = task["status"] == "publishing"
             status = "blocked" if publishing else "failed"
@@ -106,9 +106,15 @@ def reconcile_interrupted_tasks() -> None:
             con.execute("UPDATE tasks SET status=?,error=?,finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                         (status, message, task["id"]))
             con.execute("UPDATE runs SET state='interrupted',exit_code=125,finished_at=CURRENT_TIMESTAMP,report=? "
-                        "WHERE task_id=? AND state='running'", (db.dumps({"error": message}), task["id"]))
+                        "WHERE task_id=? AND state='running'", (db.dumps({"error": message,
+                            "failure_class": "restart_interrupted", "checkpoint": {
+                                "retained_worktree": task["worktree"], "requires_manual_inspection": True}}), task["id"]))
+            con.execute("UPDATE task_writer_leases SET state='orphaned',updated_at=CURRENT_TIMESTAMP "
+                        "WHERE task_id=? AND state='active'", (task["id"],))
             con.execute("INSERT INTO events(task_id,agent_id,kind,message,details) VALUES(?,?,?,?,?)",
-                        (task["id"], task["assigned_agent_id"], "restart_recovery", message, db.dumps({"previous_status": task["status"]})))
+                        (task["id"], task["assigned_agent_id"], "restart_recovery", message, db.dumps({
+                            "previous_status": task["status"], "retained_worktree": task["worktree"],
+                            "writer_lease": "orphaned"})))
 
 
 @asynccontextmanager
@@ -634,6 +640,9 @@ def get_task_details(task_id: str):
     task = task_row(task_id)
     with db.connect() as con:
         task["runs"] = [dict(r) for r in con.execute("SELECT * FROM runs WHERE task_id=? ORDER BY started_at", (task_id,)).fetchall()]
+        lease = con.execute("SELECT task_id,run_id,agent_id,state,acquired_at,updated_at "
+                            "FROM task_writer_leases WHERE task_id=?", (task_id,)).fetchone()
+    task["writer_lease"] = dict(lease) if lease else None
     return task
 
 

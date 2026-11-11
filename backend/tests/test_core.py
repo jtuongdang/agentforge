@@ -399,13 +399,36 @@ def test_db_schema_migration_is_versioned_and_backed_up(tmp_path, monkeypatch):
     db.init_db()
 
     with db.connect() as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 4
         assert "base_sha" in {row[1] for row in con.execute("PRAGMA table_info(tasks)")}
     backups = list((tmp_path / "backups").glob("pre-migration-v0-*.sqlite3"))
     assert len(backups) == 1
     with __import__("sqlite3").connect(backups[0]) as con:
         assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert "base_sha" not in {row[1] for row in con.execute("PRAGMA table_info(tasks)")}
+
+
+def test_writer_lease_migration_backs_up_version_three_database(tmp_path, monkeypatch):
+    import sqlite3
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "migration-v4.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "app-data")
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("DROP TABLE task_writer_leases")
+        con.execute("PRAGMA user_version=3")
+
+    db.init_db()
+
+    backups = list((tmp_path / "backups").glob("pre-migration-v3-*.sqlite3"))
+    assert len(backups) == 1
+    with sqlite3.connect(backups[0]) as con:
+        assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                           "AND name='task_writer_leases'").fetchone()[0] == 0
+    with db.connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                            "AND name='task_writer_leases'").fetchone()[0] == 1
 
 
 def test_packaged_data_directory_is_outside_application_bundle(tmp_path, monkeypatch):
@@ -444,6 +467,7 @@ def test_restart_reconciliation_marks_running_and_publishing_tasks_for_manual_re
         con.execute("INSERT INTO tasks(id,title,objective,repository_id,status,assigned_agent_id,file_globs) VALUES('t1','run','objective','r','running','a','[\"**/*\"]')")
         con.execute("INSERT INTO tasks(id,title,objective,repository_id,status,assigned_agent_id,file_globs) VALUES('t2','publish','objective','r','publishing','a','[\"**/*\"]')")
         con.execute("INSERT INTO runs(id,task_id,agent_id,state) VALUES('run1','t1','a','running')")
+        con.execute("INSERT INTO task_writer_leases(task_id,lease_id,run_id,agent_id,state) VALUES('t1','lease1','run1','a','active')")
 
     reconcile_interrupted_tasks()
 
@@ -451,7 +475,35 @@ def test_restart_reconciliation_marks_running_and_publishing_tasks_for_manual_re
         assert con.execute("SELECT status FROM tasks WHERE id='t1'").fetchone()[0] == "failed"
         assert con.execute("SELECT status FROM tasks WHERE id='t2'").fetchone()[0] == "blocked"
         assert con.execute("SELECT state FROM runs WHERE id='run1'").fetchone()[0] == "interrupted"
+        assert con.execute("SELECT state FROM task_writer_leases WHERE task_id='t1'").fetchone()[0] == "orphaned"
         assert con.execute("SELECT COUNT(*) FROM events WHERE kind='restart_recovery'").fetchone()[0] == 2
+
+
+def test_writer_lease_excludes_parallel_writer_and_requires_current_owner_for_transfer(tmp_path, monkeypatch):
+    from app.writer_leases import WriterLeaseManager
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "writer-lease.sqlite3")
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('r','fixture',?)", (str(tmp_path),))
+        con.execute("INSERT INTO agents(id,name,adapter,command,capabilities,file_globs) VALUES"
+                    "('a','Agent A','exec','[]','[]','[]'),('b','Agent B','exec','[]','[]','[]')")
+        con.execute("INSERT INTO tasks(id,title,objective,repository_id,file_globs) "
+                    "VALUES('t','task','objective','r','[]')")
+        con.execute("INSERT INTO runs(id,task_id,agent_id,state) VALUES"
+                    "('run-a','t','a','running'),('run-b','t','b','running')")
+
+    assert WriterLeaseManager.acquire("t", "run-a", "a", "lease-a") is True
+    assert WriterLeaseManager.acquire("t", "run-b", "b", "lease-b") is False
+    from app.reporting import ReportingManager
+    task_snapshot = ReportingManager().tasks()[0]
+    assert task_snapshot["writer_lease_state"] == "active"
+    assert task_snapshot["writer_lease_run_id"] == "run-a"
+    assert WriterLeaseManager.transfer("t", "lease-a", "run-b", "a", "run-b", "b") is False
+    assert WriterLeaseManager.transfer("t", "lease-a", "run-a", "a", "run-b", "b") is True
+    assert WriterLeaseManager.get("t")["agent_id"] == "b"
+    assert WriterLeaseManager.release("t", "lease-a") is True
+    assert WriterLeaseManager.release("t", "lease-a") is False
 
 
 def test_validation_engine_blocks_unsupported_project_instead_of_running_maven(tmp_path):
