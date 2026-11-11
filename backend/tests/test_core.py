@@ -465,7 +465,7 @@ def test_provider_api_key_stays_in_keyring_and_model_check_is_bounded(tmp_path, 
     class FakeOpener:
         def open(self, request, timeout):
             assert timeout == providers.TIMEOUT_SECONDS
-            assert request.full_url == providers.PROVIDERS["openai"]["url"]
+            assert request.full_url == providers.PROVIDER_ADAPTERS["openai"].model_endpoint("")
             assert request.get_header("Authorization") == "Bearer sk-fixture-secret"
             return FakeResponse()
 
@@ -521,7 +521,8 @@ def test_provider_catalog_adapters_use_provider_specific_auth_and_models(tmp_pat
                 assert request.full_url == "http://127.0.0.1:11434/api/tags"
                 assert "authorization" not in headers
                 return FakeResponse(fixtures["ollama"][0])
-            provider = next(key for key, value in providers.PROVIDERS.items() if request.full_url == value["url"])
+            provider = next(key for key, adapter in providers.PROVIDER_ADAPTERS.items()
+                            if key != "ollama" and request.full_url == adapter.model_endpoint(""))
             assert headers.get("accept") == "application/json"
             if provider == "openai": assert headers["authorization"] == "Bearer fixture-key"
             if provider == "anthropic":

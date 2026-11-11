@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timezone
+from typing import Protocol
 from urllib.parse import urlsplit
 
 from . import db
@@ -19,15 +20,74 @@ from . import db
 SERVICE_NAME = "devagent-orchestrator"
 MAX_RESPONSE_BYTES = 1_000_000
 TIMEOUT_SECONDS = 8
-PROVIDERS = {
-    "openai": {"name": "OpenAI", "url": "https://api.openai.com/v1/models"},
-    "anthropic": {"name": "Anthropic Claude", "url": "https://api.anthropic.com/v1/models?limit=100"},
-    "gemini": {"name": "Google Gemini", "url": "https://generativelanguage.googleapis.com/v1beta/models?pageSize=100"},
-}
-
-
 class ProviderError(RuntimeError):
     pass
+
+
+class ProviderAdapter(Protocol):
+    """Provider-specific catalog contract; credentials never enter persistent metadata."""
+    def model_endpoint(self, endpoint: str) -> str: ...
+    def request_headers(self, api_key: str | None) -> dict[str, str]: ...
+    def parse_models(self, payload: dict) -> list[str]: ...
+
+
+class _OpenAIAdapter:
+    def model_endpoint(self, _endpoint: str) -> str:
+        return "https://api.openai.com/v1/models"
+
+    def request_headers(self, api_key: str | None) -> dict[str, str]:
+        return {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+
+    def parse_models(self, payload: dict) -> list[str]:
+        return _named_models(payload.get("data", []), "id")
+
+
+class _AnthropicAdapter:
+    def model_endpoint(self, _endpoint: str) -> str:
+        return "https://api.anthropic.com/v1/models?limit=100"
+
+    def request_headers(self, api_key: str | None) -> dict[str, str]:
+        return {"Accept": "application/json", "x-api-key": api_key or "",
+                "anthropic-version": "2023-06-01"}
+
+    def parse_models(self, payload: dict) -> list[str]:
+        return _named_models(payload.get("data", []), "id")
+
+
+class _GeminiAdapter:
+    def model_endpoint(self, _endpoint: str) -> str:
+        return "https://generativelanguage.googleapis.com/v1beta/models?pageSize=100"
+
+    def request_headers(self, api_key: str | None) -> dict[str, str]:
+        return {"Accept": "application/json", "x-goog-api-key": api_key or ""}
+
+    def parse_models(self, payload: dict) -> list[str]:
+        records = payload.get("models", [])
+        names = [item.get("name") for item in records if isinstance(item, dict)
+                 and "generateContent" in item.get("supportedGenerationMethods", [])] if isinstance(records, list) else []
+        return sorted({name.removeprefix("models/") for name in names if isinstance(name, str) and name})[:100]
+
+
+class _OllamaAdapter:
+    def model_endpoint(self, endpoint: str) -> str:
+        return _ollama_url(endpoint)
+
+    def request_headers(self, _api_key: str | None) -> dict[str, str]:
+        return {"Accept": "application/json"}
+
+    def parse_models(self, payload: dict) -> list[str]:
+        return _named_models(payload.get("models", []), "name")
+
+
+def _named_models(records, field: str) -> list[str]:
+    names = [item.get(field) for item in records if isinstance(item, dict)] if isinstance(records, list) else []
+    return sorted({name for name in names if isinstance(name, str) and name})[:100]
+
+
+PROVIDER_ADAPTERS: dict[str, ProviderAdapter] = {
+    "openai": _OpenAIAdapter(), "anthropic": _AnthropicAdapter(),
+    "gemini": _GeminiAdapter(), "ollama": _OllamaAdapter(),
+}
 
 
 def _keyring():
@@ -113,7 +173,7 @@ def _raw_connection(connection_id: str):
 
 def create_connection(provider: str, name: str, model: str = "", api_key: str | None = None,
                       endpoint: str | None = None) -> dict:
-    if provider not in {*PROVIDERS, "ollama"}:
+    if provider not in PROVIDER_ADAPTERS:
         raise ProviderError("Unsupported provider")
     if provider != "ollama" and not (api_key and api_key.strip()):
         raise ProviderError("An API key is required for this provider")
@@ -205,18 +265,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _request_models(provider: str, endpoint: str, api_key: str | None) -> list[str]:
-    if provider == "ollama":
-        url = _ollama_url(endpoint)
-        headers = {"Accept": "application/json"}
-    else:
-        url = PROVIDERS[provider]["url"]
-        headers = {"Accept": "application/json"}
-        if provider == "openai":
-            headers["Authorization"] = f"Bearer {api_key}"
-        elif provider == "anthropic":
-            headers.update({"x-api-key": api_key, "anthropic-version": "2023-06-01"})
-        else:
-            headers["x-goog-api-key"] = api_key
+    adapter = PROVIDER_ADAPTERS[provider]
+    url = adapter.model_endpoint(endpoint)
+    headers = adapter.request_headers(api_key)
     request = urllib.request.Request(url, headers=headers, method="GET")
     handlers = [urllib.request.ProxyHandler({})] if provider == "ollama" else []
     handlers.append(_NoRedirect())
@@ -235,16 +286,7 @@ def _request_models(provider: str, endpoint: str, api_key: str | None) -> list[s
         payload = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise ProviderError("Provider returned an invalid model list") from None
-    if provider == "ollama":
-        records = payload.get("models", [])
-        names = [item.get("name") for item in records if isinstance(item, dict)] if isinstance(records, list) else []
-    elif provider == "gemini":
-        records = payload.get("models", [])
-        names = [item.get("name") for item in records if isinstance(item, dict) and "generateContent" in item.get("supportedGenerationMethods", [])] if isinstance(records, list) else []
-    else:
-        records = payload.get("data", [])
-        names = [item.get("id") for item in records if isinstance(item, dict)] if isinstance(records, list) else []
-    return sorted({name.removeprefix("models/") for name in names if isinstance(name, str) and name})[:100]
+    return adapter.parse_models(payload)
 
 
 def check_connection(connection_id: str) -> dict:
