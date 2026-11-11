@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
+import os
 import re
+import secrets
+import stat
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -15,7 +20,8 @@ from fastapi.staticfiles import StaticFiles
 from . import db
 from .engine import get_task, log_event, set_task
 from .git_ops import (check_repository_sync, is_github_remote, list_repository_branches,
-                      register_repository, repository, validate_repository_base)
+                      register_repository, repository, validate_repository_base,
+                      validated_revision_is_current)
 from .models import AgentCreate, CompleteHandoff, ContractCreate, RepositoryCreate, TaskCreate
 from .contracts import ContractManager
 from .orchestrator import Orchestrator
@@ -30,6 +36,43 @@ pr_manager = orchestrator.github
 reporting = orchestrator.reporting
 execution_engine = orchestrator.execution
 scheduler = orchestrator.scheduler
+ALLOWED_ORIGINS = {"http://127.0.0.1:5173", "http://localhost:5173", "tauri://localhost",
+                   "http://tauri.localhost", "https://tauri.localhost"}
+_ws_tickets: dict[str, float] = {}
+
+
+def _api_token_path() -> Path:
+    configured = os.getenv("CLINIC_ORCHESTRATOR_API_TOKEN_FILE")
+    return Path(configured).expanduser() if configured else db.DB_PATH.parent / "api-token"
+
+
+def _local_api_token() -> str:
+    configured = os.getenv("CLINIC_ORCHESTRATOR_API_TOKEN")
+    if configured:
+        return configured
+    path = _api_token_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+        if token:
+            if os.name == "posix" and stat.S_IMODE(path.stat().st_mode) & 0o077:
+                path.chmod(0o600)
+            return token
+    except FileNotFoundError:
+        pass
+    token = secrets.token_urlsafe(32)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return path.read_text(encoding="utf-8").strip()
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write(token)
+    return token
+
+
+def _host_is_loopback(host: str) -> bool:
+    hostname = host.rsplit(":", 1)[0].strip("[]").lower()
+    return hostname in {"127.0.0.1", "localhost", "[::1]", "::1", "testserver"}
 
 
 def bootstrap() -> None:
@@ -68,8 +111,44 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="DevAgent Orchestrator", version="0.1.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
-                   allow_credentials=False, allow_methods=["GET", "POST", "DELETE", "OPTIONS"], allow_headers=["Content-Type"])
+app.add_middleware(CORSMiddleware, allow_origins=sorted(ALLOWED_ORIGINS),
+                   allow_credentials=False, allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+                   allow_headers=["Content-Type", "Authorization"])
+
+
+@app.middleware("http")
+async def require_local_api_token(request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    if request.url.path.startswith("/api/") and request.url.path not in {"/api/session"}:
+        if not _host_is_loopback(request.headers.get("host", "")):
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "Local API host is not allowed"}, status_code=403)
+        supplied = request.headers.get("authorization", "")
+        expected = f"Bearer {_local_api_token()}"
+        if not hmac.compare_digest(supplied, expected):
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "Local API token required"}, status_code=401)
+    return await call_next(request)
+
+
+@app.get("/api/session")
+def local_session(request: Request):
+    origin = request.headers.get("origin", "")
+    if origin not in ALLOWED_ORIGINS or not _host_is_loopback(request.headers.get("host", "")):
+        raise HTTPException(403, "Session token is available only to the local application")
+    return {"access_token": _local_api_token()}
+
+
+@app.get("/api/ws-ticket")
+def websocket_ticket():
+    now = time.monotonic()
+    for ticket, expiry in list(_ws_tickets.items()):
+        if expiry <= now:
+            _ws_tickets.pop(ticket, None)
+    ticket = secrets.token_urlsafe(24)
+    _ws_tickets[ticket] = now + 30
+    return {"ticket": ticket}
 
 
 def decode_task(row: dict) -> dict:
@@ -122,7 +201,7 @@ def storage():
 
 
 @app.post("/api/storage/cleanup")
-def cleanup_storage(max_age_hours: float = 24.0, dry_run: bool = False):
+def cleanup_storage(max_age_hours: float = 24.0, dry_run: bool = True):
     try:
         return worktrees.prune_old(max_age_hours=max_age_hours, dry_run=dry_run)
     except Exception as exc:
@@ -282,7 +361,7 @@ def create_task(body: TaskCreate):
         raise HTTPException(404, str(exc)) from exc
     try:
         base_branch = body.base_branch or repo["default_branch"]
-        validate_repository_base(repo, base_branch)
+        base_sha = validate_repository_base(repo, base_branch)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     if body.preferred_agent_id:
@@ -299,19 +378,21 @@ def create_task(body: TaskCreate):
     if body.dependencies:
         placeholders = ",".join("?" for _ in body.dependencies)
         with db.connect() as con:
-            found = con.execute(f"SELECT id FROM tasks WHERE id IN ({placeholders})", body.dependencies).fetchall()
+            found = con.execute(f"SELECT id,repository_id FROM tasks WHERE id IN ({placeholders})", body.dependencies).fetchall()
         if len(found) != len(set(body.dependencies)):
             raise HTTPException(422, "One or more dependency tasks do not exist")
+        if any(row["repository_id"] != body.repository_id for row in found):
+            raise HTTPException(422, "Task dependencies must belong to the same repository")
         if not body.contract_id:
             raise HTTPException(422, "Tasks with dependencies require an interface contract")
     planned = execution_engine.planner.plan(body.title, body.objective, body.file_globs,
                                            body.required_capabilities, body.acceptance_criteria)
     task_id = str(uuid.uuid4())
     with db.transaction() as con:
-        con.execute("""INSERT INTO tasks(id,title,objective,acceptance_criteria,priority,repository_id,base_branch,required_capabilities,file_globs,dependencies,
-            contract_id,preferred_agent_id,max_retries) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        con.execute("""INSERT INTO tasks(id,title,objective,acceptance_criteria,priority,repository_id,base_branch,base_sha,required_capabilities,file_globs,dependencies,
+            contract_id,preferred_agent_id,max_retries) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (task_id, planned.title, planned.objective, db.dumps(body.acceptance_criteria), body.priority,
-             body.repository_id, base_branch, db.dumps(planned.required_capabilities), db.dumps(planned.file_globs),
+             body.repository_id, base_branch, base_sha, db.dumps(planned.required_capabilities), db.dumps(planned.file_globs),
              db.dumps(body.dependencies), body.contract_id, body.preferred_agent_id, body.max_retries))
     db.event(task_id, "queued", "Task accepted by planner and queued for capability matching.",
              {"allowed_globs": body.file_globs, "required_capabilities": body.required_capabilities,
@@ -347,14 +428,21 @@ def task_diff_preview(task_id: str):
         raise HTTPException(409, "Task worktree is outside the Orchestrator worktree area")
     if not worktree.is_dir():
         raise HTTPException(404, "Task worktree is no longer available")
+    if not validated_revision_is_current(str(worktree), task.get("validation", {}).get("commit")):
+        raise HTTPException(409, "Task worktree changed after validation; rerun review and validation")
     try:
-        return worktrees.diff(str(worktree), str(commit))
+        return worktrees.diff(str(worktree), str(commit), task.get("base_sha") or task.get("base_branch"))
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
 
 @app.websocket("/ws/tasks/{task_id}/events")
-async def stream_events(socket: WebSocket, task_id: str, after: int = 0):
+async def stream_events(socket: WebSocket, task_id: str, ticket: str, after: int = 0):
+    expires = _ws_tickets.pop(ticket, 0)
+    origin = socket.headers.get("origin", "")
+    if expires <= time.monotonic() or origin not in ALLOWED_ORIGINS or not _host_is_loopback(socket.headers.get("host", "")):
+        await socket.close(code=4401)
+        return
     if not get_task(task_id):
         await socket.close(code=4404)
         return
@@ -390,19 +478,20 @@ async def handoff_complete(task_id: str, body: CompleteHandoff):
     task = task_row(task_id)
     if task["status"] != "handoff_ready" or not task["worktree"]:
         raise HTTPException(409, "Task is not waiting for IDE completion")
-    paths = await asyncio.to_thread(worktrees.changed_paths, task["worktree"], task.get("base_branch"))
+    paths = await asyncio.to_thread(worktrees.changed_paths, task["worktree"], task.get("base_sha") or task.get("base_branch"))
     outside = validation_engine.inspect_scope(paths, task["file_globs"], registry.get(task["assigned_agent_id"])["file_globs"])
     secret_files = validation_engine.inspect_secrets(task["worktree"], paths)
     if outside or secret_files:
         raise HTTPException(409, {"out_of_scope": outside, "possible_secrets": secret_files})
     validation = await validation_engine.validate(
         task["worktree"], lambda kind, msg: log_event(task_id, kind, msg, agent_id=task["assigned_agent_id"]),
-        task.get("repository_validation_profile", "auto"), task.get("repository_validation_command", []))
+        task.get("repository_validation_profile", "auto"), task.get("repository_validation_command", []), paths=paths)
     if not validation["passed"]:
         set_task(task_id, "blocked" if validation.get("blocked") else "failed", error=validation["summary"], validation=validation)
         log_event(task_id, "validation_failed", validation["summary"], validation, task["assigned_agent_id"])
         raise HTTPException(422, validation)
-    commit = await asyncio.to_thread(worktrees.commit, task["worktree"], paths, task_id, task["title"])
+    commit = await asyncio.to_thread(worktrees.commit, task["worktree"], paths, task_id, task["title"],
+                                     task.get("base_sha") or task.get("base_branch"))
     validation.update({"changed_paths": paths, "commit": commit, "handoff_report": body.report, "scope_passed": True})
     set_task(task_id, "awaiting_pr_approval", validation=validation)
     log_event(task_id, "awaiting_pr_approval", "Handoff diff validated and committed; push/Draft PR requires approval.", validation,
@@ -419,6 +508,8 @@ def approve_draft_pr(task_id: str, confirmation: str):
         raise HTTPException(422, f"To approve, enter: CREATE DRAFT PR {task_id[:8]}")
     if not task["validation"].get("passed") or not task["validation"].get("scope_passed"):
         raise HTTPException(409, "Validation and scope check must pass before pushing")
+    if not validated_revision_is_current(task["worktree"], task["validation"].get("commit")):
+        raise HTTPException(409, "Task worktree changed after validation; rerun validation before publishing")
     repo = repository(task["repository_id"])
     if not is_github_remote(repo.get("remote")):
         raise HTTPException(422, "Draft PR publishing currently supports GitHub remotes only; no push was attempted")
@@ -453,6 +544,8 @@ def complete_task_locally(task_id: str):
         raise HTTPException(409, "Task is not ready for local completion")
     if not task["validation"].get("passed") or not task["validation"].get("scope_passed"):
         raise HTTPException(409, "Validation and scope check must pass before completion")
+    if not validated_revision_is_current(task["worktree"], task["validation"].get("commit")):
+        raise HTTPException(409, "Task worktree changed after validation; rerun validation before completion")
     with db.transaction() as con:
         claimed = con.execute("""UPDATE tasks SET status='completed',finished_at=CURRENT_TIMESTAMP,
             updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='awaiting_pr_approval'""", (task_id,))

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import asyncio
 from pathlib import Path
+from .processes import process_group_options, terminate_process_tree
 
 SECRET_PATTERNS = [
     # Match literal values assigned to credential-like keys. Do not treat normal
@@ -34,12 +35,13 @@ class ValidationEngine:
     async def validate(self, worktree: str, log, profile: str = "auto",
                        command: list[str] | None = None,
                        paths: list[str] | None = None) -> dict:
-        if paths and all(p.endswith((".md", ".txt", ".rst")) or p.startswith("docs/") for p in paths):
-            log("validation", "All changed paths are documentation; skipping heavy build/compile validation.")
-            return {"passed": True, "blocked": False, "profile": "docs_skip", "command": None,
-                    "exit_code": 0, "summary": "Documentation-only change passed validation."}
         if profile == "custom" and command:
             return await run_configured_validation(worktree, command, log)
+        documentation_suffixes = (".md", ".txt", ".rst")
+        if paths and all(Path(p).suffix.lower() in documentation_suffixes for p in paths):
+            log("validation", "All changed files are documentation; project build validation was skipped.")
+            return {"passed": True, "blocked": False, "profile": "docs_skip", "command": None,
+                    "exit_code": 0, "summary": "Documentation-only change passed the configured docs policy."}
         if profile == "auto" and (Path(worktree) / "pom.xml").is_file():
             return await run_maven_verify(worktree, log)
         return {"passed": False, "blocked": True, "profile": "unsupported", "command": None,
@@ -114,7 +116,8 @@ async def run_configured_validation(worktree: str, command: list[str], log) -> d
     log("validation", "Running the repository's configured validation command (argv, without a shell).")
     try:
         proc = await asyncio.create_subprocess_exec(*command, cwd=worktree,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=os.environ.copy())
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=os.environ.copy(),
+            **process_group_options())
     except OSError:
         return {"passed": False, "blocked": True, "profile": "custom", "command": "configured project command",
                 "exit_code": None, "summary": "Could not start the configured validation executable."}
@@ -140,11 +143,14 @@ async def run_configured_validation(worktree: str, command: list[str], log) -> d
         code = await asyncio.wait_for(proc.wait(), timeout=1200)
         await reader
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await terminate_process_tree(proc)
         reader.cancel()
         return {"passed": False, "blocked": False, "profile": "custom", "command": "configured project command",
                 "exit_code": 124, "summary": "Configured validation exceeded the 20 minute limit."}
+    except asyncio.CancelledError:
+        await terminate_process_tree(proc)
+        reader.cancel()
+        raise
     summary = "Configured project validation passed." if code == 0 else "Configured project validation failed."
     tail = "\n".join(chunks[-100:])
     if truncated:
@@ -167,7 +173,8 @@ async def run_maven_verify(worktree: str, log) -> dict:
     env = {**os.environ, "MAVEN_OPTS": os.getenv("MAVEN_OPTS", "-Xmx1g")}
     try:
         proc = await asyncio.create_subprocess_exec(*command, cwd=worktree,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=env)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=env,
+            **process_group_options())
         chunks: list[str] = []
         async def stream():
             assert proc.stdout is not None
@@ -182,11 +189,14 @@ async def run_maven_verify(worktree: str, log) -> dict:
             code = await asyncio.wait_for(proc.wait(), timeout=1200)
             await reader
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            await terminate_process_tree(proc)
             reader.cancel()
             return {"passed": False, "blocked": False, "command": "mvn clean verify", "exit_code": 124,
                     "summary": "Maven validation exceeded the 20 minute limit."}
+        except asyncio.CancelledError:
+            await terminate_process_tree(proc)
+            reader.cancel()
+            raise
     except OSError as exc:
         return {"passed": False, "blocked": True, "command": "mvn clean verify", "exit_code": None,
                 "summary": f"Could not start Maven: {exc}"}

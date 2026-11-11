@@ -74,7 +74,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY, title TEXT NOT NULL, objective TEXT NOT NULL,
             acceptance_criteria TEXT NOT NULL DEFAULT '[]', priority TEXT NOT NULL DEFAULT 'normal',
-            repository_id TEXT NOT NULL REFERENCES repositories(id), base_branch TEXT,
+            repository_id TEXT NOT NULL REFERENCES repositories(id), base_branch TEXT, base_sha TEXT,
             status TEXT NOT NULL DEFAULT 'queued',
             required_capabilities TEXT NOT NULL DEFAULT '[]', file_globs TEXT NOT NULL,
             dependencies TEXT NOT NULL DEFAULT '[]', contract_id TEXT REFERENCES contracts(id),
@@ -103,6 +103,7 @@ def init_db() -> None:
             "acceptance_criteria": "TEXT NOT NULL DEFAULT '[]'",
             "priority": "TEXT NOT NULL DEFAULT 'normal'",
             "base_branch": "TEXT",
+            "base_sha": "TEXT",
         }
         for name, declaration in task_migrations.items():
             if name not in task_columns:

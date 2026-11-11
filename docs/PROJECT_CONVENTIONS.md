@@ -11,7 +11,7 @@ Trước khi sửa file, Agent phải đọc phần **Mandatory project guidance
 - `docs/PROJECT_CONVENTIONS.md`, `docs/DEVELOPMENT_CONVENTIONS.md`, `docs/README.md`.
 - Tài liệu nghiệp vụ/kiến trúc nếu có: `DOMAIN_ANALYSIS.md`, `ERD_DIAGRAM.md`, `UI_CODING_STANDARDS.md`, `ARCHITECTURE.md`.
 
-Nếu hướng dẫn xung đột nhau, ưu tiên theo thứ tự: yêu cầu task và contract đã duyệt → hướng dẫn gần file nhất (`AGENTS.md` trong thư mục con) → quy ước riêng của repository → quy ước nền này. Báo cáo xung đột thay vì tự đoán. Trước khi tạo file, tìm class/file tương tự và dùng lại cấu trúc, cách đặt tên, thư viện và kiểu test hiện có.
+Nếu hướng dẫn xung đột nhau, ưu tiên theo thứ tự: yêu cầu task và contract đã duyệt → quy ước riêng của repository → `AGENTS.md` áp dụng trực tiếp tại đường dẫn đang sửa → quy ước nền này. Quy tắc bảo mật và bảo toàn dữ liệu luôn có hiệu lực; nếu hướng dẫn thấp hơn yêu cầu hành động nguy hiểm hoặc phá hủy, dừng và báo operator. Báo cáo xung đột thay vì tự đoán. Trước khi tạo file, tìm module/file tương tự và dùng lại cấu trúc, cách đặt tên, thư viện và kiểu test hiện có.
 
 Khi hoàn tất, báo danh sách tài liệu hướng dẫn đã được đọc, các file đã tạo/sửa, lệnh kiểm định và kết quả. Nếu tài liệu bắt buộc không có hoặc không đọc được, nêu rõ trong báo cáo.
 
@@ -31,6 +31,21 @@ Khi hoàn tất, báo danh sách tài liệu hướng dẫn đã được đọc
 - Dùng quy ước đang có trong repository. Nếu chưa có, chọn tên dễ tìm, nhất quán với loại nội dung: tài liệu Markdown `UPPER_SNAKE_CASE.md` hoặc style hiện hữu; migration giữ đúng format/version của công cụ migration; asset đặt tên mô tả chức năng.
 - Không tạo hai file cùng mục đích với tên gần giống nhau. Không tự đổi tên/xóa file đang được dùng nếu task không yêu cầu.
 - Tên file không dấu, không khoảng trắng, không ký tự ngẫu nhiên; chỉ dùng dấu gạch dưới/gạch ngang khi phù hợp convention của stack.
+
+### Python / FastAPI (backend Orchestrator)
+
+- Giữ module trong `backend/app/`, dùng `snake_case` cho module, hàm và biến; type dùng `PascalCase`.
+- Route HTTP mỏng: kiểm tra request/permission, gọi module nghiệp vụ và trả response rõ ràng. Đặt điều phối task ở `orchestrator.py`/`scheduler.py`, Git ở `git_ops.py`/`worktrees.py`, kiểm định ở `validation.py`, truy xuất tài liệu ở `rag.py`.
+- Chạy subprocess bằng argv (`create_subprocess_exec`/`subprocess.run`), không nối chuỗi qua shell. Đặt timeout, xử lý cancellation/process con và giới hạn/redact output trước khi lưu log.
+- Dùng migration SQLite cộng dồn, tương thích dữ liệu local cũ; không tự đổi schema phá hủy hoặc thao tác database của project người dùng.
+- Test bằng pytest và dữ liệu tổng hợp trong `backend/tests/`; không cần provider credentials hoặc mạng ngoài để test logic lõi.
+
+### React / TypeScript (dashboard)
+
+- Code giao diện ở `dashboard/src/`; dùng React function components, TypeScript types rõ ràng và style hiện có trong `App.css`/`index.css`.
+- Gọi backend qua helper `api()` và REST/WebSocket hiện hữu; không truy cập SQLite hay filesystem từ component.
+- Giữ loading/error/empty states và hành động nhạy cảm có xác nhận dễ hiểu. Không đưa token/secret vào local storage, URL, console hoặc event log.
+- Chạy `npm run build` và `npm run lint` tại `dashboard/` khi sửa frontend; không cập nhật lockfile nếu dependency không đổi.
 
 ## 3. Tạo file và package theo kiến trúc
 

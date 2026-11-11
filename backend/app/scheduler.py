@@ -5,14 +5,14 @@ from datetime import datetime, timezone
 
 from . import db
 from .engine import AgentExecutionEngine, get_task, log_event, redact, set_task
-from .git_ops import repository
+from .git_ops import repository, run
 from .validation import scopes_may_overlap
 
 
 class TaskScheduler:
     """Dispatches independent ready tasks within each executor's configured concurrency limit."""
 
-    SUCCESS_STATES = {"completed", "draft_pr", "awaiting_pr_approval", "handoff_complete"}
+    SUCCESS_STATES = {"completed"}
     FAILURE_STATES = {"failed", "blocked", "cancelled", "missing"}
 
     def __init__(self, execution: AgentExecutionEngine):
@@ -50,7 +50,8 @@ class TaskScheduler:
                 import time as _t
                 if _t.time() - self._last_prune_time > 3600:
                     self._last_prune_time = _t.time()
-                    asyncio.create_task(asyncio.to_thread(self.execution.worktrees.prune_old, 24.0, False, True))
+                    # Background maintenance may report cleanup candidates, but must never delete user data.
+                    asyncio.create_task(asyncio.to_thread(self.execution.worktrees.prune_old, 24.0, True, True))
                     from .storage import prune_events
                     asyncio.create_task(asyncio.to_thread(prune_events))
             except Exception:
@@ -107,6 +108,8 @@ class TaskScheduler:
             return None
         if any(state not in self.SUCCESS_STATES for state in dependency_states):
             return None
+        if task["dependencies"] and not self._dependencies_integrated(task):
+            return None
         if task["dependencies"] and not task["contract_id"]:
             set_task(task["id"], "waiting_for_contract")
             log_event(task["id"], "contract_required", "Dependent tasks require an approved interface contract.")
@@ -127,6 +130,22 @@ class TaskScheduler:
             if agent["available"] and self.agent_counts.get(agent["id"], 0) < agent["max_parallel"]:
                 return agent
         return None
+
+    @staticmethod
+    def _dependencies_integrated(task: dict) -> bool:
+        repo = repository(task["repository_id"])
+        base_branch = task.get("base_branch") or repo["default_branch"]
+        for dependency_id in task["dependencies"]:
+            dependency = get_task(dependency_id)
+            if not dependency or dependency["repository_id"] != task["repository_id"]:
+                return False
+            commit = (dependency.get("validation") or {}).get("commit")
+            if not commit:
+                return False
+            integrated = run(["git", "merge-base", "--is-ancestor", commit, base_branch], repo["path"])
+            if integrated.returncode != 0:
+                return False
+        return True
 
     def _scope_conflict(self, task: dict) -> str | None:
         base_branch = task.get("base_branch") or repository(task["repository_id"])["default_branch"]

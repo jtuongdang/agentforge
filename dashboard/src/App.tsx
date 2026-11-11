@@ -3,6 +3,18 @@ import type { FormEvent, ReactNode } from 'react'
 import './App.css'
 
 const API = '/api'
+let apiTokenPromise: Promise<string> | null = null
+
+async function getApiToken(): Promise<string> {
+  if (!apiTokenPromise) {
+    apiTokenPromise = fetch(`${API}/session`).then(async response => {
+      if (!response.ok) throw new Error('Local API session could not be established')
+      const session = await response.json() as { access_token: string }
+      return session.access_token
+    }).catch(error => { apiTokenPromise = null; throw error })
+  }
+  return apiTokenPromise
+}
 type Agent = { id: string; name: string; adapter: string; capabilities: string[]; file_globs: string[]; max_parallel: number; available: boolean; availability_note: string; enabled: boolean; credential_status: string; credential_checked_at?: string | null; credential_note: string; credential_usage: { groups?: Record<string, unknown>[] } }
 type Repo = { id: string; name: string; path: string; default_branch: string; remote: string | null; validation_profile: string; validation_command: string[] }
 type RepoBranch = { name: string; local: boolean; remote: boolean }
@@ -13,7 +25,8 @@ type Nav = 'Overview' | 'Tasks' | 'Agents' | 'Contracts' | 'History' | 'Storage'
 type StorageMetrics = { measured_at: string; data_bytes: number; categories: Record<string, number>; database_files: Record<string, number>; sqlite_logical_bytes: number; sqlite_unused_bytes: number; disk: { total_bytes: number; free_bytes: number; used_percent: number }; counts: { repositories: number; agents: number; tasks: number; runs: number; events: number; active_tasks: number } }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API}${path}`, { ...init, headers: { 'Content-Type': 'application/json', ...init?.headers } })
+  const token = await getApiToken()
+  const response = await fetch(`${API}${path}`, { ...init, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...init?.headers } })
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`
     try { const body = await response.json(); detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail) } catch { /* keep default */ }
@@ -92,7 +105,8 @@ function App() {
       let existing: EventRow[] = []
       try { existing = await api<EventRow[]>(`/tasks/${selected.id}/events`); setEvents(existing) } catch { /* task may have just been removed */ }
       const lastId = Math.max(0, ...existing.map(row => row.id))
-      socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/tasks/${selected.id}/events?after=${lastId}`)
+      const socketTicket = await api<{ticket:string}>('/ws-ticket')
+      socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/tasks/${selected.id}/events?after=${lastId}&ticket=${encodeURIComponent(socketTicket.ticket)}`)
       socket.onmessage = event => { const row = JSON.parse(event.data) as EventRow; setEvents(current => [...current, row]) }
     }
     void load()

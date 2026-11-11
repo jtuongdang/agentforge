@@ -15,6 +15,7 @@ from .validation import ValidationEngine
 from .worktrees import GitWorktreeManager
 from .planner import TaskPlanner
 from .project_guidance import load_project_guidance
+from .processes import process_group_options, terminate_process_tree
 from .registry import AgentRegistry
 
 REDACTIONS = [
@@ -84,7 +85,7 @@ class AgentExecutionEngine:
                   {"files": guidance_files}, agent_id=agent["id"])
         try:
             branch, worktree = await asyncio.to_thread(
-                self.worktrees.prepare, repo, task_id, task["base_branch"], task["title"])
+                self.worktrees.prepare, repo, task_id, task.get("base_sha") or task["base_branch"], task["title"])
             task_file = Path(db.ROOT) / "data" / "handoffs" / f"{task_id}.md"
             task_file.parent.mkdir(parents=True, exist_ok=True)
             task_content = self._task_markdown(task, plan, branch, worktree)
@@ -112,7 +113,8 @@ class AgentExecutionEngine:
                 if code != 0:
                     last_error = f"Agent process exited with status {code}."
                 else:
-                    paths = await asyncio.to_thread(self.worktrees.changed_paths, worktree, task.get("base_branch"))
+                    paths = await asyncio.to_thread(self.worktrees.changed_paths, worktree,
+                                                    task.get("base_sha") or task.get("base_branch"))
                     outside = self.validation.inspect_scope(paths, task["file_globs"], agent["file_globs"])
                     secret_files = self.validation.inspect_secrets(worktree, paths)
                     if outside:
@@ -130,7 +132,8 @@ class AgentExecutionEngine:
                         repo.get("validation_profile", "auto"), repo.get("validation_command", []),
                         paths=paths)
                     if validation["passed"]:
-                        sha = await asyncio.to_thread(self.worktrees.commit, worktree, paths, task_id, task["title"], task.get("base_branch"))
+                        sha = await asyncio.to_thread(self.worktrees.commit, worktree, paths, task_id, task["title"],
+                                                      task.get("base_sha") or task.get("base_branch"))
                         validation.update({"changed_paths": paths, "commit": sha, "scope_passed": True})
                         set_task(task_id, "awaiting_pr_approval", validation=validation, error=None)
                         log_event(task_id, "awaiting_pr_approval", "Validation passed and task branch committed; push/Draft PR requires approval.",
@@ -229,7 +232,7 @@ class AgentExecutionEngine:
             proc = await asyncio.create_subprocess_exec(*args, cwd=worktree,
                 stdin=asyncio.subprocess.PIPE if stdin_text else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-                limit=8 * 1024 * 1024)
+                limit=8 * 1024 * 1024, **process_group_options())
             assert proc.stdout is not None
             if stdin_text and proc.stdin:
                 proc.stdin.write(stdin_text.encode())
@@ -243,11 +246,14 @@ class AgentExecutionEngine:
             try:
                 await asyncio.wait_for(asyncio.gather(stream_output(), proc.wait()), timeout=3600)
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                await terminate_process_tree(proc)
                 log_event(task_id, "agent_timeout", "Agent process exceeded 60 minute limit.", agent_id=agent["id"])
                 return 124
             return proc.returncode or 0
+        except asyncio.CancelledError:
+            if "proc" in locals():
+                await terminate_process_tree(proc)
+            raise
         except FileNotFoundError:
             raise RuntimeError(f"Configured agent executable not found: {args[0]}")
 
@@ -304,6 +310,7 @@ class AgentExecutionEngine:
         return (f"# {plan.title}\n\n{plan.objective}\n"
                 f"\n## Isolation\nBase branch: `{task.get('base_branch') or 'repository default'}`\n"
                 f"Task branch: `{branch}`\nWorktree: `{worktree}`\n"
+                f"Pinned base commit: `{task.get('base_sha') or 'not recorded'}`\n"
                 f"\n## Allowed files\n" + "\n".join(f"- `{p}`" for p in plan.file_globs) +
                 f"\n## Contract\n{contract or 'No shared contract declared.'}\n"
                 "## Constraints\n- Use synthetic or appropriately anonymized test data; never copy real personal or confidential data.\n"

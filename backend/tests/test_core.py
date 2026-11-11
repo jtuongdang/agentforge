@@ -15,6 +15,39 @@ from app.registry import AgentRegistry
 from app.git_ops import task_diff
 
 
+def authenticated_test_client(monkeypatch):
+    monkeypatch.setattr("app.main._local_api_token", lambda: "fixture-local-api-token")
+    return TestClient(app, headers={"Authorization": "Bearer fixture-local-api-token",
+                                    "Origin": "http://127.0.0.1:5173"})
+
+
+def test_local_api_requires_token_and_limits_session_bootstrap_origin(monkeypatch):
+    monkeypatch.setattr("app.main._local_api_token", lambda: "fixture-local-api-token")
+    with TestClient(app) as client:
+        assert client.get("/api/health").status_code == 401
+        assert client.get("/api/session").status_code == 403
+        session = client.get("/api/session", headers={"Origin": "http://127.0.0.1:5173"})
+        assert session.status_code == 200
+        assert session.json()["access_token"] == "fixture-local-api-token"
+        preflight = client.options("/api/health", headers={"Origin": "http://127.0.0.1:5173",
+            "Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": "authorization"})
+        assert preflight.status_code == 200
+        assert client.get("/api/ws-ticket").status_code == 401
+        assert client.get("/api/ws-ticket", headers={"Authorization": "Bearer fixture-local-api-token",
+            "Origin": "http://127.0.0.1:5173"}).status_code == 200
+
+
+def test_websocket_rejects_missing_or_unissued_ticket():
+    from starlette.websockets import WebSocketDisconnect
+
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect) as closed:
+            with client.websocket_connect("/ws/tasks/unknown/events?ticket=not-issued",
+                                         headers={"Origin": "http://127.0.0.1:5173"}):
+                pass
+        assert closed.value.code == 4401
+
+
 def test_task_planner_keeps_the_declared_file_boundary():
     plan = TaskPlanner().plan("Small task", "Implement one UI label", ["clinic-desktop/src/**/*.java"], ["java"],
                               ["The label is visible to a user."],
@@ -71,7 +104,7 @@ def test_contracts_and_task_creation_are_persisted_in_sqlite(tmp_path, monkeypat
     subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                     "commit", "--allow-empty", "-m", "initial"], check=True, capture_output=True)
 
-    with TestClient(app) as client:
+    with authenticated_test_client(monkeypatch) as client:
         registered = client.post("/api/repositories", json={"name": "Fixture", "path": str(repo), "default_branch": "main"})
         assert registered.status_code == 201, registered.text
         contract = client.post("/api/contracts", json={"title": "DTO boundary", "body": "The DTO contains an id and display name."})
@@ -96,10 +129,14 @@ def test_no_remote_task_can_be_completed_locally_without_pushing(tmp_path, monke
     repo = tmp_path / "local-repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    (repo / "tracked.md").write_text("validated\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.md"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-                    "commit", "--allow-empty", "-m", "initial"], check=True, capture_output=True)
+                    "commit", "-m", "initial"], check=True, capture_output=True)
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True,
+                          text=True).stdout.strip()
 
-    with TestClient(app) as client:
+    with authenticated_test_client(monkeypatch) as client:
         registered = client.post("/api/repositories", json={"name": "Local only", "path": str(repo), "default_branch": "main"})
         task = client.post("/api/tasks", json={"title": "Local task", "objective": "Save the completed work locally.",
             "repository_id": registered.json()["id"], "required_capabilities": ["no-fixture-agent"],
@@ -107,7 +144,11 @@ def test_no_remote_task_can_be_completed_locally_without_pushing(tmp_path, monke
         assert task.status_code == 202
         with db.transaction() as con:
             con.execute("UPDATE tasks SET status='awaiting_pr_approval',branch='agent/task-test',worktree=?,validation=? WHERE id=?",
-                (str(tmp_path / "worktree-placeholder"), db.dumps({"passed": True, "scope_passed": True, "commit": "fixture"}), task.json()["id"]))
+                (str(repo), db.dumps({"passed": True, "scope_passed": True, "commit": head}), task.json()["id"]))
+        (repo / "after-validation.txt").write_text("changed\n", encoding="utf-8")
+        stale = client.post(f"/api/tasks/{task.json()['id']}/complete-local")
+        assert stale.status_code == 409
+        (repo / "after-validation.txt").unlink()
         completed = client.post(f"/api/tasks/{task.json()['id']}/complete-local")
         assert completed.status_code == 200, completed.text
         assert completed.json()["status"] == "completed"
@@ -154,7 +195,7 @@ def test_sqlite_snapshot_backup_verify_and_restore_to_new_file(tmp_path):
 def test_health_reports_database_scheduler_and_agents(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "health.sqlite3")
     monkeypatch.setattr("app.main.registry.refresh", lambda: [])
-    with TestClient(app) as client:
+    with authenticated_test_client(monkeypatch) as client:
         response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json()["ok"] is True
@@ -176,7 +217,7 @@ def test_storage_endpoint_reports_sqlite_worktrees_and_record_counts(tmp_path, m
     (data_root / "handoffs").mkdir()
     (data_root / "handoffs" / "task.md").write_text("handoff", encoding="utf-8")
 
-    with TestClient(app) as client:
+    with authenticated_test_client(monkeypatch) as client:
         response = client.get("/api/storage")
 
     assert response.status_code == 200, response.text
@@ -227,6 +268,27 @@ def test_validation_engine_blocks_unsupported_project_instead_of_running_maven(t
     assert "Auto mode supports Maven" in result["summary"]
 
 
+def test_docs_folder_does_not_skip_code_validation(tmp_path):
+    import asyncio
+
+    result = asyncio.run(ValidationEngine().validate(str(tmp_path), lambda *_: None,
+        profile="auto", paths=["docs/runtime.py"]))
+
+    assert result["blocked"] is True
+    assert result["profile"] == "unsupported"
+
+
+def test_custom_validator_runs_for_documentation_changes(tmp_path):
+    import asyncio
+    import sys
+
+    result = asyncio.run(ValidationEngine().validate(str(tmp_path), lambda *_: None,
+        profile="custom", command=[sys.executable, "-c", "raise SystemExit(7)"], paths=["README.md"]))
+
+    assert result["passed"] is False
+    assert result["exit_code"] == 7
+
+
 def test_secret_scanner_ignores_credential_getters_but_detects_literal_values(tmp_path):
     source = tmp_path / "Auth.java"
     source.write_text(
@@ -273,6 +335,7 @@ def test_task_diff_returns_patch_for_a_specific_commit(tmp_path):
     subprocess.run(["git", "-C", str(repo), "add", "note.md"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                     "commit", "-m", "initial"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "checkout", "-b", "task"], check=True, capture_output=True)
     (repo / "note.md").write_text("after\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "commit", "-am", "task change"],
                    check=True, capture_output=True, env={**__import__("os").environ, "GIT_AUTHOR_NAME": "Fixture",
@@ -281,11 +344,33 @@ def test_task_diff_returns_patch_for_a_specific_commit(tmp_path):
     commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
                             capture_output=True, text=True).stdout.strip()
 
-    preview = task_diff(str(repo), commit)
+    preview = task_diff(str(repo), commit, base_branch="main")
 
     assert "-before" in preview["diff"]
     assert "+after" in preview["diff"]
     assert preview["truncated"] is False
+
+
+def test_changed_paths_includes_all_commits_and_uncommitted_files(tmp_path):
+    from app.git_ops import changed_paths
+
+    repo = tmp_path / "changeset-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Fixture"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "fixture@example.invalid"], check=True)
+    (repo / "base.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True)
+    base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "-C", str(repo), "checkout", "-b", "task"], check=True, capture_output=True)
+    (repo / "first.py").write_text("first = True\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "first.py"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "first task commit"], check=True, capture_output=True)
+    (repo / "second.md").write_text("second\n", encoding="utf-8")
+
+    assert changed_paths(str(repo), base) == ["first.py", "second.md"]
 
 
 def test_github_remote_detection_rejects_non_github_hosts():
@@ -406,7 +491,7 @@ def test_agent_api_check_and_remove_keep_agent_history(tmp_path, monkeypatch):
         stderr = ""
 
     monkeypatch.setattr("app.registry.subprocess.run", lambda *args, **kwargs: Result())
-    with TestClient(app) as client:
+    with authenticated_test_client(monkeypatch) as client:
         checked = client.post("/api/agents/codex-api-fixture/check-token")
         assert checked.status_code == 200
         assert checked.json()["credential_status"] == "valid"
@@ -613,6 +698,8 @@ def test_prune_worktrees_preserves_active_tasks_and_removes_old(tmp_path, monkey
 
     subprocess.run(["git", "worktree", "add", "-b", "branch-active", str(wt_active), "main"], cwd=repo_dir, check=True)
     subprocess.run(["git", "worktree", "add", "-b", "branch-old", str(wt_old), "main"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "merge", "--no-ff", "branch-old", "-m", "integrate old task"], cwd=repo_dir,
+                   check=True, capture_output=True)
 
     with db.transaction() as con:
         con.execute("""INSERT INTO tasks(id,title,objective,file_globs,repository_id,status,worktree)
@@ -640,7 +727,7 @@ def test_prune_worktrees_preserves_active_tasks_and_removes_old(tmp_path, monkey
         assert old_row["worktree"] is None
 
 
-def test_prune_worktrees_cleans_targets_only_for_unmerged_branches(tmp_path, monkeypatch):
+def test_prune_worktrees_preserves_unmerged_source_and_untracked_build_files(tmp_path, monkeypatch):
     from app.worktrees import prune_worktrees
 
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "target-test.sqlite3")
@@ -681,7 +768,7 @@ def test_prune_worktrees_cleans_targets_only_for_unmerged_branches(tmp_path, mon
                      str(wt_unmerged), "orchestrator/unmerged-feat", "2020-01-01T00:00:00+00:00"))
 
     res = prune_worktrees(max_age_hours=24.0, dry_run=False, clean_unmerged_targets_only=True)
-    assert res["target_cleaned_count"] == 1
+    assert res["target_cleaned_count"] == 0
     assert res["fully_removed_count"] == 0
 
     # Source code is preserved 100%!
@@ -689,8 +776,8 @@ def test_prune_worktrees_cleans_targets_only_for_unmerged_branches(tmp_path, mon
     assert source_file.exists()
     assert source_file.read_text() == "public class Service {}"
 
-    # Only target/ was cleaned
-    assert not target_dir.exists()
+    # Build output is untracked data too; cleanup leaves it for explicit operator review.
+    assert target_dir.exists()
 
 
 
@@ -753,8 +840,50 @@ def test_prune_events_removes_old_noise_but_keeps_milestones_and_active(tmp_path
     assert kinds == [("live", "agent_log"), ("done", "completed")]
 
 
-def test_dashboard_static_mount_serves_spa():
-    with TestClient(app) as client:
+def test_scheduler_dependency_requires_commit_in_selected_base(monkeypatch):
+    from app import scheduler as scheduler_module
+
+    task = {"repository_id": "r", "base_branch": "main", "dependencies": ["d"]}
+    dependency = {"repository_id": "r", "validation": {"commit": "a" * 40}}
+    monkeypatch.setattr(scheduler_module, "repository", lambda _rid: {"path": "/fixture", "default_branch": "main"})
+    monkeypatch.setattr(scheduler_module, "get_task", lambda _tid: dependency)
+    monkeypatch.setattr(scheduler_module, "run", lambda *_args: subprocess.CompletedProcess([], 1, "", ""))
+    assert scheduler_module.TaskScheduler._dependencies_integrated(task) is False
+    monkeypatch.setattr(scheduler_module, "run", lambda *_args: subprocess.CompletedProcess([], 0, "", ""))
+    assert scheduler_module.TaskScheduler._dependencies_integrated(task) is True
+
+
+def test_terminate_process_tree_stops_child_process(tmp_path):
+    import asyncio
+    import os
+    import sys
+    import time
+    from app.processes import process_group_options, terminate_process_tree
+
+    if os.name != "posix":
+        pytest.skip("Process group termination assertion currently targets POSIX")
+    ready = tmp_path / "child-ready"
+    marker = tmp_path / "child-survived"
+    child_code = ("import pathlib,time; pathlib.Path(%r).write_text('ready'); "
+                  "time.sleep(0.5); pathlib.Path(%r).write_text('survived')") % (str(ready), str(marker))
+    parent_code = ("import subprocess,sys; subprocess.Popen([sys.executable,'-c',%r])") % child_code
+
+    async def scenario():
+        process = await asyncio.create_subprocess_exec(sys.executable, "-c", parent_code, **process_group_options())
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        assert ready.exists(), "child failed to start"
+        await process.wait()  # The group leader may exit while the descendant remains alive.
+        await terminate_process_tree(process, grace_seconds=0.5)
+        await asyncio.sleep(0.7)
+        assert not marker.exists(), "child outlived its process group"
+
+    asyncio.run(scenario())
+
+
+def test_dashboard_static_mount_serves_spa(monkeypatch):
+    with authenticated_test_client(monkeypatch) as client:
         res = client.get("/")
         assert res.status_code == 200
         assert "<!doctype html>" in res.text

@@ -75,6 +75,11 @@ def validate_repository_base(repo: dict, base_branch: str | None = None) -> str:
 
 
 def resolve_base_commit(root: Path, branch: str) -> str:
+    if re.fullmatch(r"[0-9a-fA-F]{40,64}", branch):
+        pinned = run(["git", "rev-parse", "--verify", f"{branch}^{{commit}}"], root)
+        if pinned.returncode == 0:
+            return pinned.stdout.strip()
+        raise RuntimeError("Pinned base commit is no longer available in this repository")
     local_ref = f"refs/heads/{branch}"
     remote_ref = f"refs/remotes/origin/{branch}"
     refs: dict[str, str] = {}
@@ -142,29 +147,49 @@ def create_worktree(repo: dict, task_id: str, base_ref: str, title: str) -> tupl
 
 
 def changed_paths(worktree: str, base_branch: str | None = None) -> list[str]:
-    tracked = run(["git", "diff", "HEAD", "--name-only", "-z"], worktree)
-    untracked = run(["git", "ls-files", "--others", "--exclude-standard", "-z"], worktree)
-    if tracked.returncode or untracked.returncode:
-        raise RuntimeError("Could not inspect the task diff")
-    values = set(p for p in tracked.stdout.split("\0") if p)
-    values.update(p for p in untracked.stdout.split("\0") if p)
-    
-    # If working tree is clean, agent may have already committed to HEAD directly
-    if not values and base_branch:
+    """Return the union of all task commits and current index/worktree changes."""
+    values: set[str] = set()
+    if base_branch:
         committed = run(["git", "diff", f"{base_branch}...HEAD", "--name-only", "-z"], worktree)
-        if committed.returncode == 0:
-            values.update(p for p in committed.stdout.split("\0") if p)
+        if committed.returncode != 0:
+            raise RuntimeError("Could not inspect committed task changes against the base branch")
+        values.update(p for p in committed.stdout.split("\0") if p)
+
+    for args in (["git", "diff", "HEAD", "--name-only", "-z"],
+                 ["git", "diff", "--cached", "--name-only", "-z"],
+                 ["git", "ls-files", "--others", "--exclude-standard", "-z"]):
+        result = run(args, worktree)
+        if result.returncode != 0:
+            raise RuntimeError("Could not inspect all task changes")
+        values.update(p for p in result.stdout.split("\0") if p)
     return sorted(values)
 
 
-def task_diff(worktree: str, commit: str, max_chars: int = 250_000) -> dict:
+def task_diff(worktree: str, commit: str, max_chars: int = 250_000,
+              base_branch: str | None = None) -> dict:
     if not re.fullmatch(r"[0-9a-f]{40,64}", commit):
         raise ValueError("Task commit reference is invalid")
-    result = run(["git", "show", "--format=", "--no-ext-diff", "--no-color", "--unified=40", commit], worktree, timeout=30)
+    args = ["git", "diff", "--no-ext-diff", "--no-color", "--unified=40"]
+    if base_branch:
+        args.append(f"{base_branch}...{commit}")
+    else:
+        args.extend([f"{commit}^", commit])
+    result = run(args, worktree, timeout=30)
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "Could not read task diff").strip()[-1000:])
     value = result.stdout
     return {"diff": value[:max_chars], "truncated": len(value) > max_chars}
+
+
+def validated_revision_is_current(worktree: str, validated_head: str | None) -> bool:
+    """Reject review/publication when the worktree changed after validation."""
+    if not validated_head:
+        return False
+    head = run(["git", "rev-parse", "HEAD"], worktree)
+    if head.returncode != 0 or head.stdout.strip() != validated_head:
+        return False
+    status = run(["git", "status", "--porcelain", "--untracked-files=all"], worktree)
+    return status.returncode == 0 and not status.stdout.strip()
 
 
 def is_github_remote(remote: str | None) -> bool:
@@ -197,8 +222,8 @@ def commit_changes(worktree: str, paths: list[str], task_id: str, title: str, ba
         # Agent already committed its changes directly; verify HEAD differs from base
         head_commit = require_ok(["git", "rev-parse", "HEAD"], worktree)
         if base_branch:
-            base_commit = run(["git", "rev-parse", base_branch], worktree).stdout.strip()
-            if head_commit == base_commit:
+            ancestor = run(["git", "merge-base", "--is-ancestor", base_branch, head_commit], worktree)
+            if ancestor.returncode != 0:
                 raise RuntimeError("Agent completed without producing a change")
     return require_ok(["git", "rev-parse", "HEAD"], worktree)
 

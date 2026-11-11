@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,7 +8,8 @@ from pathlib import Path
 from . import db
 from .git_ops import changed_paths, commit_changes, create_worktree, run, task_diff
 
-ACTIVE_STATUSES = ("planning", "assigned", "running", "validating", "recovering", "awaiting_pr_approval", "publishing")
+ACTIVE_STATUSES = ("planning", "assigned", "running", "validating", "recovering", "handoff_ready",
+                   "awaiting_pr_approval", "publishing")
 
 
 def _tree_size(root: Path) -> int:
@@ -26,50 +26,20 @@ def _tree_size(root: Path) -> int:
     return total
 
 
-def _clean_targets_in_worktree(worktree_path: Path, dry_run: bool = False) -> int:
-    """Removes compiler target/ artifact directories inside a worktree while preserving all source files."""
-    freed = 0
-    if not worktree_path.exists():
-        return 0
-    for root_dir, dirs, _ in os.walk(worktree_path, topdown=True):
-        if "target" in dirs:
-            target_dir = Path(root_dir) / "target"
-            sz = _tree_size(target_dir)
-            freed += sz
-            if not dry_run:
-                shutil.rmtree(target_dir, ignore_errors=True)
-            dirs.remove("target")  # Don't recurse into target
-    return freed
-
-
-def is_branch_merged_or_pushed(repo_path: Path, branch: str | None, default_branch: str = "main") -> bool:
-    """Checks if a task branch is already pushed to origin or merged into a main/feature branch."""
-    if not branch or not repo_path.is_dir():
+def is_worktree_safe_to_remove(worktree_path: Path, base_branch: str | None) -> bool:
+    """Only remove a clean worktree after its HEAD is integrated into the selected base."""
+    if not worktree_path.is_dir() or not base_branch:
         return False
-
-    # 1. Check if pushed to origin
-    has_remote = run(["git", "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{branch}"], cwd=repo_path).returncode == 0
-    if has_remote:
-        return True
-
-    # 2. Check if merged into main, master, or current branch
-    for target in (default_branch, "main", "master", "feature/patient-reception-workflow"):
-        ref_exists = run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{target}"], cwd=repo_path).returncode == 0
-        if ref_exists:
-            is_ancestor = run(["git", "merge-base", "--is-ancestor", branch, target], cwd=repo_path).returncode == 0
-            if is_ancestor:
-                return True
-    return False
+    status = run(["git", "status", "--porcelain", "--untracked-files=all", "--ignored=matching"], cwd=worktree_path)
+    if status.returncode != 0 or status.stdout.strip():
+        return False
+    merged = run(["git", "merge-base", "--is-ancestor", "HEAD", base_branch], cwd=worktree_path)
+    return merged.returncode == 0
 
 
 def prune_worktrees(max_age_hours: float = 24.0, dry_run: bool = False,
                     clean_unmerged_targets_only: bool = True) -> dict:
-    """Ultra-safe worktree cleanup:
-    1. Active tasks are strictly preserved (never touched).
-    2. Finished tasks that are MERGED or PUSHED: fully removed via git worktree remove.
-    3. Finished tasks that are NOT YET MERGED/PUSHED: keep worktree and all source files intact,
-       only clean compiler artifact 'target/' directories to save space safely.
-    """
+    """Remove only old, clean worktrees whose task commit is integrated into their selected base."""
     now = datetime.now(timezone.utc)
     now_epoch = time.time()
     max_age_seconds = max_age_hours * 3600
@@ -84,7 +54,7 @@ def prune_worktrees(max_age_hours: float = 24.0, dry_run: bool = False,
         active_ids = {row["id"] for row in active_rows}
 
         candidate_rows = con.execute(f"""
-            SELECT id, repository_id, branch, worktree, status, finished_at, updated_at, created_at, pr_url
+            SELECT id, repository_id, branch, base_branch, worktree, status, finished_at, updated_at, created_at
             FROM tasks
             WHERE status NOT IN ({active_marks}) AND worktree IS NOT NULL
         """, ACTIVE_STATUSES).fetchall()
@@ -102,6 +72,15 @@ def prune_worktrees(max_age_hours: float = 24.0, dry_run: bool = False,
         wt_path = Path(wt_str)
         if not wt_path.exists():
             continue
+        managed_root = (Path(db.ROOT) / "data" / "worktrees").resolve()
+        try:
+            resolved_worktree = wt_path.resolve(strict=True)
+            relative_worktree = resolved_worktree.relative_to(managed_root)
+        except (OSError, ValueError):
+            continue
+        if len(relative_worktree.parts) != 2 or relative_worktree.parts[0] != row["repository_id"]:
+            continue
+        wt_path = resolved_worktree
 
         ts_str = row["finished_at"] or row["updated_at"] or row["created_at"]
         age_ok = False
@@ -129,16 +108,9 @@ def prune_worktrees(max_age_hours: float = 24.0, dry_run: bool = False,
             default_branch = repo_info.get("default_branch", "main")
             branch = row["branch"]
 
-            is_safe_to_fully_remove = False
-            # Check PR url
-            if row["pr_url"]:
-                is_safe_to_fully_remove = True
-            elif repo_path:
-                is_safe_to_fully_remove = is_branch_merged_or_pushed(repo_path, branch, default_branch)
-
-            # Failed tasks with no commits produced can also be fully removed safely
-            if row["status"] in ("failed", "cancelled") and not branch:
-                is_safe_to_fully_remove = True
+            # A PR URL or remote-tracking ref does not prove merge or preservation of local edits.
+            base_branch = row["base_branch"] or default_branch
+            is_safe_to_fully_remove = is_worktree_safe_to_remove(wt_path, base_branch)
 
             worktrees_to_process.append({
                 "task_id": task_id,
@@ -155,28 +127,23 @@ def prune_worktrees(max_age_hours: float = 24.0, dry_run: bool = False,
         task_id = item["task_id"]
         repo_path = item["repo_path"]
 
-        if item["can_fully_remove"] or not clean_unmerged_targets_only:
+        if item["can_fully_remove"]:
             # Full removal
             size = _tree_size(wt_path)
             freed_bytes += size
             fully_removed.append({"task_id": task_id, "path": str(wt_path), "bytes": size})
 
             if not dry_run:
-                if repo_path and repo_path.is_dir():
-                    run(["git", "worktree", "remove", "--force", str(wt_path)], cwd=repo_path)
-                    affected_repos.add(repo_path)
-
-                if wt_path.exists():
-                    shutil.rmtree(wt_path, ignore_errors=True)
+                if not repo_path or not repo_path.is_dir():
+                    continue
+                removed = run(["git", "worktree", "remove", str(wt_path)], cwd=repo_path)
+                if removed.returncode != 0:
+                    continue
+                affected_repos.add(repo_path)
 
                 with db.transaction() as con:
                     con.execute("UPDATE tasks SET worktree=NULL WHERE id=?", (task_id,))
-        else:
-            # Ultra-safe: Unmerged branch -> Clean compiler target/ only, keep source code 100%
-            target_freed = _clean_targets_in_worktree(wt_path, dry_run=dry_run)
-            if target_freed > 0:
-                freed_bytes += target_freed
-                target_cleaned.append({"task_id": task_id, "path": str(wt_path), "bytes": target_freed})
+        # Dirty, ignored, unmerged and handoff worktrees are retained for operator review.
 
     if not dry_run:
         for repo_path in affected_repos:
@@ -201,7 +168,7 @@ def prune_worktrees(max_age_hours: float = 24.0, dry_run: bool = False,
         "remaining_count": remaining,
         "max_age_hours": max_age_hours,
         "dry_run": dry_run,
-        "policy": "ultra_safe (merged/pushed -> full remove, unmerged -> clean target/ only)",
+        "policy": "preview by default; remove only clean worktrees integrated into their selected base; retain all other worktrees",
     }
 
 
@@ -217,8 +184,8 @@ class GitWorktreeManager:
     def commit(self, worktree: str, paths: list[str], task_id: str, title: str, base_branch: str | None = None) -> str:
         return commit_changes(worktree, paths, task_id, title, base_branch=base_branch)
 
-    def diff(self, worktree: str, commit: str) -> dict:
-        return task_diff(worktree, commit)
+    def diff(self, worktree: str, commit: str, base_branch: str | None = None) -> dict:
+        return task_diff(worktree, commit, base_branch=base_branch)
 
     def prune_old(self, max_age_hours: float = 24.0, dry_run: bool = False,
                   clean_unmerged_targets_only: bool = True) -> dict:

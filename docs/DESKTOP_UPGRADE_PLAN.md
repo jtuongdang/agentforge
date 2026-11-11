@@ -2,7 +2,7 @@
 
 Ngày khảo sát ban đầu: **11/11/2026**. Ngày rà soát bổ sung: **11/11/2026**. Nguồn yêu cầu: `docs/DESKTOP_PRODUCT_SPEC.md` (19 mục, 1.497 dòng).
 
-Trạng thái: **đề xuất triển khai**, chưa bắt đầu nâng cấp runtime. Tài liệu này phân biệt yêu cầu trong spec, bằng chứng từ mã nguồn và quyết định kiến trúc đề xuất. Mã nguồn được dẫn theo phiên bản đang có trong workspace; số dòng có thể thay đổi sau refactor.
+Trạng thái: **đang triển khai theo phase** trên nhánh `codex/desktop-upgrade`, đồng bộ với repository `jtuongdang/agentforge`. Phần khảo sát ban đầu dưới đây được giữ làm lịch sử; tiến độ thực thi cập nhật ở mục Phase 0. Tài liệu này phân biệt yêu cầu trong spec, bằng chứng từ mã nguồn và quyết định kiến trúc đề xuất. Mã nguồn được dẫn theo phiên bản đang có trong workspace; số dòng có thể thay đổi sau refactor.
 
 ## 1. Kết luận để quyết định triển khai
 
@@ -18,15 +18,15 @@ Mốc đầu tiên đề xuất là **Desktop alpha trên macOS arm64**: mở ap
 
 | Kiểm tra | Kết quả ngày 11/11/2026 | Ý nghĩa |
 |---|---|---|
-| `.venv/bin/python -m pytest backend/tests -q` | **37 passed, 1 failed**, 1 deprecation warning | Chưa có baseline xanh để nâng cấp |
+| `.venv/bin/python -m pytest backend/tests -q` (khảo sát ban đầu) | **37 passed, 1 failed**, 1 deprecation warning | Lỗi lịch sử do conventions chưa có; cập nhật lần chạy Phase 0 xem bên dưới |
 | Test thất bại | `test_project_guidance_loads_root_and_scoped_agent_instructions`, `backend/tests/test_core.py:44` | Thiếu `docs/PROJECT_CONVENTIONS.md` mà code và test yêu cầu |
 | `npm run build` tại `dashboard/` | Pass | TypeScript và Vite build được; chưa chứng minh Desktop chạy được |
 | `npm run lint` tại `dashboard/` | Exit 0; **6 warnings**, 0 errors | Các cảnh báo về effect/dependency và biến trong async ở `App.tsx` |
 | Cấu trúc Desktop | Không có `src-tauri/`, không có component onboarding | Chưa có nền tảng đóng gói native |
-| Quản lý mã nguồn workspace | `git status` báo không có Git repository | Cần thiết lập/khôi phục checkout có quản lý phiên bản trước khi triển khai code |
+| Quản lý mã nguồn workspace (khảo sát ban đầu) | `git status` báo không có Git repository | Đã khởi tạo local baseline và nối remote sau khi owner gửi repo |
 | Tài liệu tham chiếu lúc khảo sát đầu | README trỏ tới `PROJECT_CONVENTIONS`, `COMPLETION_ROADMAP`, `IMPLEMENTATION_PLAN`, `ENVIRONMENT_REPORT`, `OPERATIONS` nhưng lúc đó chưa thấy các file | Đã cập nhật lại bên dưới theo workspace hiện tại |
 
-**Cập nhật khi rà soát lại:** `docs/PROJECT_CONVENTIONS.md` và `docs/COMPLETION_ROADMAP.md` hiện đã có. Lỗi test ở trên là kết quả lịch sử trước khi thêm conventions; chưa chạy lại suite ở lần rà soát này nên không kết luận test hiện đã pass. README hiện vẫn trỏ tới `IMPLEMENTATION_PLAN.md`, `ENVIRONMENT_REPORT.md`, `OPERATIONS.md` chưa thấy trong `docs/`. `COMPLETION_ROADMAP.md` là roadmap hoàn thiện Orchestrator, còn tài liệu này lập kế hoạch cho Desktop; khi quyết định thứ tự ưu tiên nên coi Desktop là roadmap phụ thuộc vào các cổng chất lượng/bảo mật trong roadmap Orchestrator, không thay thế chúng. Workspace vẫn không có thư mục `.git`, nên chưa thể tạo diff/version history để review thay đổi.
+**Cập nhật khi rà soát lại:** `docs/PROJECT_CONVENTIONS.md` và `docs/COMPLETION_ROADMAP.md` đã có; README được sửa để chỉ liên kết tới tài liệu hiện hữu. `COMPLETION_ROADMAP.md` là roadmap hoàn thiện Orchestrator, còn tài liệu này lập kế hoạch cho Desktop; Desktop phụ thuộc vào các cổng chất lượng/bảo mật của roadmap Orchestrator, không thay thế chúng. Workspace ban đầu chưa có `.git`; sau khi owner gửi remote, đã khởi tạo branch `codex/desktop-upgrade`, tạo baseline local và nối remote GitHub rỗng.
 
 **Đánh giá `PROJECT_CONVENTIONS.md`:** phù hợp làm quy ước nền và đã được `project_guidance.py` nạp vào task. Nội dung về synthetic data, secret, file scope, migration, xác minh và báo cáo khớp mục tiêu sản phẩm. Trước khi dùng làm chuẩn cho cả dự án, nên bổ sung quy ước Python/FastAPI, React/TypeScript và SQLite; hiện phần Java/Clean Architecture khá chi tiết nhưng không phản ánh cấu trúc code chính. Cụm “hướng dẫn gần file nhất (`AGENTS.md`) ưu tiên quy ước riêng của repo” cũng nên đổi: đề xuất thứ tự là task/contract → quy ước riêng của repo → `AGENTS.md` áp dụng trực tiếp tại path → quy ước nền, miễn không trái quy tắc an toàn bắt buộc. Đây là hạng mục cập nhật tài liệu trong Phase 0, không phải yêu cầu viết lại toàn bộ conventions.
 
@@ -200,6 +200,8 @@ Mỗi phase cần có: (a) API/schema/UX decision đã duyệt, (b) thay đổi 
 **Thứ tự thực hiện:** (1) khôi phục Git baseline và chốt API/data invariants; (2) tạo changeset chuẩn dựa trên base SHA; (3) áp dụng changeset vào scope/secret scan, diff và validation; (4) khóa cleanup tới khi có ownership/dirty checks; (5) thêm API/WS auth và role scopes; (6) quản lý process tree và state/dependency; (7) cập nhật guidance/log redaction/docs.
 
 **Điều kiện hoàn thành:** suite xanh; đủ regression cho commit hỗn hợp, nhiều commit, docs executable, dirty cleanup, đổi SHA sau validation, cancel process tree, dependency integration; REST/WS từ client chưa được cấp quyền bị từ chối. Không yêu cầu chạy AI thật để chứng minh các invariant này.
+
+**Tiến độ thực thi (11/11/2026):** Đang hoàn thiện Phase 0. Đã sửa changeset/diff theo base SHA, cleanup mặc định preview và chỉ xóa worktree sạch đã tích hợp, validation docs-only, token cho API local và ticket một lần cho WebSocket, process-group cancellation, dependency cùng repo và commit tích hợp, kiểm tra revision trước review/publish/complete. Regression hiện có: **45 passed**; dashboard production build pass; lint exit 0 với 6 warning React còn lại. Đang rà soát và chuẩn bị commit/push sau khi chạy lại kiểm định cuối.
 
 ### Phase 1 — Cấu hình và onboarding backend
 
