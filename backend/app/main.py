@@ -578,6 +578,11 @@ def provider_connections():
     return providers.list_connections()
 
 
+@app.get("/api/providers/credential-store")
+def provider_credential_store_status():
+    return providers.credential_store_status()
+
+
 @app.post("/api/providers", status_code=201)
 def create_provider_connection(body: ProviderConnectionCreate):
     api_key = body.api_key.get_secret_value() if body.api_key else None

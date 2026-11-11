@@ -503,9 +503,13 @@ function TaskTable({tasks,onSelect,selectedId}:{tasks:Task[];onSelect:(task:Task
 function Status({status}:{status:string}) { const tone = status === 'draft_pr' || status === 'completed' ? 'success' : status === 'failed' || status === 'blocked' ? 'danger' : status === 'awaiting_pr_approval' || status === 'handoff_ready' || status === 'waiting_for_contract' || status === 'waiting_for_scope' ? 'warning' : 'blue'; return <span className={`badge ${tone}`}><span/> {statusLabel[status] || status}</span> }
 function ProviderConnections() {
   const [items, setItems] = useState<ProviderConnection[]>([])
+  const [credentialStore, setCredentialStore] = useState<{available:boolean;store:string;backend?:string;reason?:string}|null>(null)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
-  const refresh = useCallback(async () => setItems(await api<ProviderConnection[]>('/providers')), [])
+  const refresh = useCallback(async () => {
+    const [connections,store] = await Promise.all([api<ProviderConnection[]>('/providers'),api<{available:boolean;store:string;backend?:string;reason?:string}>('/providers/credential-store')])
+    setItems(connections); setCredentialStore(store)
+  }, [])
   useEffect(() => { void refresh().catch(e => setMessage(e instanceof Error ? e.message : 'Could not load providers')) }, [refresh])
   const create = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -537,7 +541,7 @@ function ProviderConnections() {
     catch (e) { setMessage(e instanceof Error ? e.message : 'Could not remove provider') }
   }
   return <section className="panel" style={{marginTop:16}}>
-    <div className="panel-heading"><div><h2>Provider connections</h2><p>BYOK credentials are stored in the OS keyring. These connections currently support credential and model discovery; they are not scheduled coding workers.</p></div></div>
+    <div className="panel-heading"><div><h2>Provider connections</h2><p>BYOK credentials are stored in the OS keyring. These connections currently support credential and model discovery; they are not scheduled coding workers.</p><small className="credential-note">Credential store: <b>{credentialStore?.available ? credentialStore.backend : credentialStore?.reason || 'checking…'}</b></small></div></div>
     <form className="form" onSubmit={create}>
       <div className="form-grid">
         <label>Provider<select name="provider" defaultValue="openai"><option value="openai">OpenAI</option><option value="anthropic">Anthropic Claude</option><option value="gemini">Google Gemini</option><option value="ollama">Ollama (local)</option></select></label>

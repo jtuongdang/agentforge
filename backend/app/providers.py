@@ -133,6 +133,15 @@ def _keyring():
         raise ProviderError("Could not access the operating-system credential store") from exc
 
 
+def credential_store_status() -> dict:
+    try:
+        backend = _keyring().get_keyring()
+        return {"available": True, "store": "OS credential store",
+                "backend": type(backend).__module__ + "." + type(backend).__name__}
+    except ProviderError as exc:
+        return {"available": False, "store": "OS credential store", "reason": str(exc)}
+
+
 def _ollama_url(endpoint: str | None) -> str:
     base = (endpoint or "http://127.0.0.1:11434").rstrip("/")
     parsed = urlsplit(base)

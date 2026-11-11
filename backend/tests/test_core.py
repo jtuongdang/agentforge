@@ -557,6 +557,7 @@ def test_provider_api_requires_local_token_and_never_returns_secret(tmp_path, mo
         def set_password(self, service, username, password): self.values[(service, username)] = password
         def get_password(self, service, username): return self.values.get((service, username))
         def delete_password(self, service, username): self.values.pop((service, username), None)
+        def get_keyring(self): return self
 
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-api.sqlite3")
     monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
@@ -569,6 +570,8 @@ def test_provider_api_requires_local_token_and_never_returns_secret(tmp_path, mo
         assert response.status_code == 201
         assert "sk-never-return-this" not in response.text
         assert response.json()["has_credential"] is True
+        store = client.get("/api/providers/credential-store")
+        assert store.status_code == 200 and store.json()["available"] is True
         listed = client.get("/api/providers")
         assert listed.status_code == 200
         assert "sk-never-return-this" not in listed.text
