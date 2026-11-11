@@ -629,6 +629,7 @@ def test_scheduler_does_not_admit_agent_during_credential_cooldown(tmp_path, mon
 
 def test_engine_moves_rate_limited_task_to_budgeted_rescue_worker(tmp_path, monkeypatch):
     import asyncio
+    import sys
     from app.engine import AgentExecutionEngine
     from app.fleet import cooldown_remaining
 
@@ -639,12 +640,24 @@ def test_engine_moves_rate_limited_task_to_budgeted_rescue_worker(tmp_path, monk
     repo_path.mkdir()
     worktree = tmp_path / "task-worktree"
     worktree.mkdir()
+    (worktree / "src").mkdir()
+    primary_cli = tmp_path / "primary-worker"
+    rescue_cli = tmp_path / "rescue-worker"
+    primary_cli.write_text(f"#!{sys.executable}\nimport sys\nprint('HTTP 429 Too Many Requests', flush=True)\nsys.exit(1)\n",
+                           encoding="utf-8")
+    rescue_cli.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nPath('src/app.py').write_text('ready = True\\n')\nprint('rescue complete')\n",
+                          encoding="utf-8")
+    primary_cli.chmod(0o755)
+    rescue_cli.chmod(0o755)
+    primary_command = [str(primary_cli)]
+    rescue_command = [str(rescue_cli)]
     with db.transaction() as con:
         con.execute("INSERT INTO repositories(id,name,path,default_branch) VALUES('r','fixture',?,'main')",
                     (str(repo_path),))
         con.execute("INSERT INTO agents(id,name,adapter,command,capabilities,file_globs,max_parallel,enabled,available) VALUES"
-                    "('a','Primary','exec','[\"/bin/primary\"]','[\"implementation\"]','[\"**/*\"]',1,1,1),"
-                    "('b','Rescue','exec','[\"/bin/rescue\"]','[\"implementation\"]','[\"**/*\"]',1,1,1)")
+                    "('a','Primary','exec',?,'[\"implementation\"]','[\"**/*\"]',1,1,1),"
+                    "('b','Rescue','exec',?,'[\"implementation\"]','[\"**/*\"]',1,1,1)",
+                    (db.dumps(primary_command), db.dumps(rescue_command)))
         con.execute("""INSERT INTO tasks(id,title,objective,repository_id,base_branch,status,
             required_capabilities,file_globs,max_retries) VALUES('t','implement','do work','r','main','queued',
             '["implementation"]','["**/*"]',1)""")
@@ -667,9 +680,9 @@ def test_engine_moves_rate_limited_task_to_budgeted_rescue_worker(tmp_path, monk
         async def validate(self, *_args, **_kwargs):
             return {"passed": True}
 
-    primary = {"id": "a", "name": "Primary", "adapter": "exec", "command": ["/bin/primary"],
+    primary = {"id": "a", "name": "Primary", "adapter": "exec", "command": primary_command,
                "capabilities": ["implementation"], "file_globs": ["**/*"], "enabled": True, "available": True}
-    rescue = {"id": "b", "name": "Rescue", "adapter": "exec", "command": ["/bin/rescue"],
+    rescue = {"id": "b", "name": "Rescue", "adapter": "exec", "command": rescue_command,
               "capabilities": ["implementation"], "file_globs": ["**/*"], "enabled": True, "available": True}
     class FakeRegistry:
         @staticmethod
@@ -677,18 +690,8 @@ def test_engine_moves_rate_limited_task_to_budgeted_rescue_worker(tmp_path, monk
             return [primary, rescue]
 
     engine = AgentExecutionEngine(FakeRegistry(), FakeWorktrees(), FakeValidation())
-    calls = []
-    async def invoke(agent, _worktree, _task_file, _prompt, _task_id, _globs, on_output=None):
-        calls.append(agent["id"])
-        if agent["id"] == "a":
-            on_output("HTTP 429 Too Many Requests")
-            return 1
-        return 0
-    engine._invoke = invoke
-
     asyncio.run(engine.execute("t", primary))
 
-    assert calls == ["a", "b"]
     with db.connect() as con:
         task = con.execute("SELECT status,assigned_agent_id,worktree FROM tasks WHERE id='t'").fetchone()
         runs = con.execute("SELECT agent_id,state FROM runs WHERE task_id='t' ORDER BY started_at,rowid").fetchall()
