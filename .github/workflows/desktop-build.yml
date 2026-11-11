@@ -18,6 +18,7 @@ jobs:
     name: ${{ matrix.target }}
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         include:
           - target: aarch64-apple-darwin
