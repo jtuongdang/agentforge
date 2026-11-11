@@ -2139,6 +2139,35 @@ def test_validation_stops_descendants_after_worker_exits(tmp_path):
     assert not marker.exists(), "validator descendant survived the completed validation"
 
 
+def test_windows_job_object_kills_worker_when_owner_crashes(tmp_path):
+    import os
+    import subprocess
+    import sys
+    import time
+
+    if os.name != "nt":
+        pytest.skip("Windows Job Object crash containment is platform-specific")
+    ready = tmp_path / "job-owner-ready"
+    marker = tmp_path / "job-worker-survived-owner"
+    child_code = ("import pathlib,time; time.sleep(1.0); pathlib.Path(%r).write_text('survived')") % str(marker)
+    owner_code = ("import asyncio,os,sys,pathlib; from app.processes import create_managed_process,process_group_options\n"
+                  "async def main():\n"
+                  "    await create_managed_process(sys.executable,'-c',%r,stdout=asyncio.subprocess.DEVNULL,"
+                  "stderr=asyncio.subprocess.DEVNULL,**process_group_options())\n"
+                  "    pathlib.Path(%r).write_text('ready')\n"
+                  "    os._exit(0)\n"
+                  "asyncio.run(main())") % (child_code, str(ready))
+    backend_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    owner = subprocess.Popen([sys.executable, "-c", owner_code], cwd=backend_root)
+    deadline = time.monotonic() + 10
+    while not ready.exists() and owner.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert ready.exists(), "crash fixture failed to attach worker to a Job Object"
+    assert owner.wait(timeout=5) == 0
+    time.sleep(1.3)
+    assert not marker.exists(), "Windows worker survived an abrupt owner process exit"
+
+
 def test_dashboard_static_mount_serves_spa(monkeypatch):
     with authenticated_test_client(monkeypatch) as client:
         res = client.get("/")
