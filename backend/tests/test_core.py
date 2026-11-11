@@ -1690,6 +1690,8 @@ def test_checkpoint_export_redacts_credentials_paths_and_disabled_agents(tmp_pat
     import zipfile
     from app import portability
 
+    assert portability._redact_remote("git@github.com:org/repo.git") == "git@github.com:org/repo.git"
+    assert portability._redact_remote("alice@github.com:org/repo.git") == "github.com:org/repo.git"
     repo = _portable_checkpoint_fixture(tmp_path, monkeypatch)
     (repo / "local-only.txt").write_text("uncommitted but not secret\n", encoding="utf-8")
     target = tmp_path / "fixture.devagent"

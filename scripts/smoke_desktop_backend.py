@@ -50,6 +50,15 @@ def read_json(url: str, headers: dict[str, str] | None = None) -> dict:
         return json.loads(response.read())
 
 
+def post_json(url: str, payload: dict, headers: dict[str, str]) -> dict:
+    request = Request(url, data=json.dumps(payload).encode("utf-8"), headers={
+        **headers, "Content-Type": "application/json"}, method="POST")
+    with urlopen(request, timeout=30) as response:
+        if response.status != 200:
+            raise RuntimeError(f"Local API returned HTTP {response.status}")
+        return json.loads(response.read())
+
+
 @contextmanager
 def temporary_workspace():
     """Retry Windows temp cleanup while the terminated sidecar releases files."""
@@ -134,7 +143,23 @@ def main() -> int:
                 integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
             if version < 5 or integrity != "ok":
                 raise RuntimeError(f"Packaged database failed checks: schema={version}, integrity={integrity}")
-            print(f"Packaged sidecar smoke passed: API ready on loopback, token auth passed, schema={version}.")
+            headers = {"Authorization": f"Bearer {token}"}
+            checkpoint = post_json(base + "/api/storage/checkpoints", {"include_uncommitted": False}, headers)
+            checkpoint_path = temp / "data" / "checkpoints" / checkpoint["filename"]
+            if not checkpoint_path.is_file():
+                raise RuntimeError("Packaged sidecar did not create its checkpoint archive")
+            restore_parent = temp / "restored"
+            restore_parent.mkdir()
+            restored = post_json(base + "/api/storage/checkpoints/restore", {
+                "checkpoint_path": str(checkpoint_path), "destination_parent": str(restore_parent)}, headers)
+            restored_database = Path(restored["database_path"])
+            if not restored_database.is_file() or not (Path(restored["path"]) / "RESTORE-README.txt").is_file():
+                raise RuntimeError("Packaged sidecar did not produce a complete restored profile")
+            with closing(sqlite3.connect(restored_database)) as con:
+                restored_integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
+            if restored_integrity != "ok" or restored["repository_count"] != 0:
+                raise RuntimeError("Packaged restored profile failed database or repository checks")
+            print(f"Packaged sidecar smoke passed: API/token auth, schema={version}, checkpoint export/restore.")
             return 0
         except Exception as exc:
             print(f"Packaged sidecar smoke failed: {exc}", file=sys.stderr)

@@ -43,6 +43,7 @@ type StorageMetrics = { measured_at: string; data_bytes: number; categories: Rec
 type CheckpointWorktree = { task_id: string; available: boolean; dirty_paths: string[]; secret_paths?: string[]; secret_scan_incomplete_paths?: string[]; scan_error?: string }
 type CheckpointRepository = { id: string; name: string; default_branch: string; remote: string | null; available: boolean; dirty_paths: string[]; secret_paths?: string[]; secret_scan_incomplete_paths?: string[]; scan_error?: string; worktrees: CheckpointWorktree[] }
 type CheckpointPreview = { active_tasks: number; repositories: CheckpointRepository[]; uncommitted_included_by_default: boolean; credential_policy: string }
+type DataProfileStatus = { active: boolean; available: boolean; path: string | null }
 type FleetSettings = { max_active_runs: number; max_parallel_builds: number; max_per_credential: number; min_free_disk_bytes: number; disk_reserve_per_run_bytes: number }
 type FleetSnapshot = { settings: FleetSettings; active_runs: { task_id: string; title: string; status: string; assigned_agent_id?: string; agent_name?: string; repository_name?: string; run_id?: string }[]; credential_cooldowns: { adapter: string; executable: string; reason: string; expires_at: string }[]; active_run_count: number; queued_tasks: number; draining: boolean; builds_active: number; disk: { free_bytes: number; required_reserve_bytes: number; can_admit_run: boolean } }
 type LeadStatus = { connected: boolean; session: { session_id: string; client_id: string; client_name: string; scopes: string[]; lease_expires_at: string; session_expires_at: string } | null }
@@ -403,7 +404,10 @@ function StoragePage({metrics,error,busy,onRefresh}:{metrics:StorageMetrics|null
   const [includeUncommitted,setIncludeUncommitted] = useState(false)
   const [checkpointError,setCheckpointError] = useState('')
   const [checkpointNotice,setCheckpointNotice] = useState('')
+  const [restoredDataDir,setRestoredDataDir] = useState('')
+  const [profileStatus,setProfileStatus] = useState<DataProfileStatus|null>(null)
   useEffect(() => { void api<CheckpointPreview>('/storage/checkpoint-preview').then(setCheckpointPreview).catch(e => setCheckpointError(e instanceof Error ? e.message : 'Could not inspect checkpoint state')) }, [])
+  useEffect(() => { if (isTauri()) void invoke<DataProfileStatus>('data_profile_status').then(setProfileStatus).catch(() => setProfileStatus(null)) }, [])
   const checkpointDirtyCount = checkpointPreview?.repositories.reduce((count, repo) => count + repo.dirty_paths.length + repo.worktrees.reduce((n, worktree) => n + worktree.dirty_paths.length, 0), 0) || 0
   const checkpointBlocked = Boolean(checkpointPreview && (checkpointPreview.repositories.some(repo => !repo.available || (includeUncommitted && (repo.scan_error || repo.secret_paths?.length || repo.secret_scan_incomplete_paths?.length || repo.worktrees.some(worktree => !worktree.available || worktree.scan_error || worktree.secret_paths?.length || worktree.secret_scan_incomplete_paths?.length))))))
   const exportCheckpoint = async () => {
@@ -440,10 +444,23 @@ function StoragePage({metrics,error,busy,onRefresh}:{metrics:StorageMetrics|null
       const restored = await api<{path:string;repository_count:number;worktree_count:number}>('/storage/checkpoints/restore', {
         method: 'POST', body: JSON.stringify({ checkpoint_path: selected[0], destination_parent: selected[1] }),
       })
-      setCheckpointNotice(`Đã khôi phục ${restored.repository_count} repositories và ${restored.worktree_count} worktrees tại ${restored.path}. Các task cần được kiểm tra trước khi chạy lại.`)
+      setRestoredDataDir(`${restored.path}/data`)
+      setCheckpointNotice(`Đã khôi phục ${restored.repository_count} repositories và ${restored.worktree_count} worktrees tại ${restored.path}. Profile hiện tại chưa bị đổi; các task cần được kiểm tra trước khi chạy lại.`)
     } catch (e) {
       setCheckpointError(e instanceof Error ? e.message : 'Could not restore project checkpoint')
     } finally { setCheckpointBusy(false) }
+  }
+  const activateRestoredProfile = async () => {
+    if (!restoredDataDir || checkpointBusy) return
+    if (!window.confirm('Đổi profile sẽ đóng ứng dụng. Dữ liệu profile hiện tại được giữ nguyên và có thể quay lại từ Storage sau khi mở lại ứng dụng. Tiếp tục?')) return
+    try { await invoke('activate_restored_profile', { dataDir: restoredDataDir }) }
+    catch (e) { setCheckpointError(e instanceof Error ? e.message : 'Could not activate restored profile') }
+  }
+  const resetDataProfile = async () => {
+    if (!profileStatus?.active) return
+    if (!window.confirm('Ứng dụng sẽ đóng và lần mở tiếp theo sẽ dùng lại dữ liệu ban đầu. Profile đã restore vẫn được giữ nguyên trên đĩa. Tiếp tục?')) return
+    try { await invoke('reset_data_profile') }
+    catch (e) { setCheckpointError(e instanceof Error ? e.message : 'Could not return to the original profile') }
   }
   if (error && !metrics) return <div className="panel"><div className="panel-heading"><div><h2>Không đọc được dung lượng</h2><p>{error}</p></div><button className="button secondary" onClick={onRefresh}>Thử lại</button></div></div>
   if (!metrics) return <div className="panel storage-loading">Đang đọc thống kê lưu trữ…</div>
@@ -454,6 +471,8 @@ function StoragePage({metrics,error,busy,onRefresh}:{metrics:StorageMetrics|null
     {volumeWarning !== 'ok' && <div className={`storage-alert ${volumeWarning}`}><b>{volumeWarning === 'critical' ? 'Ổ đĩa gần đầy' : 'Dung lượng ổ đĩa đang cao'}</b><span>Ổ đĩa đã dùng {metrics.disk.used_percent}%. Kiểm tra worktree và các file build trước khi tạo thêm task.</span></div>}
     <section className="panel checkpoint-panel"><div className="panel-heading"><div><h2>Sao lưu và di chuyển dự án</h2><p>Xuất lịch sử, contracts, Git refs và repository bundles thành một file .devagent có kiểm tra SHA-256.</p></div><div className="checkpoint-actions">{isTauri() && <button className="button secondary" disabled={checkpointBusy} onClick={() => void restoreCheckpoint()}>{checkpointBusy ? 'Đang xử lý…' : 'Restore checkpoint'}</button>}<button className="button primary" disabled={checkpointBusy || !checkpointPreview || checkpointBlocked || (checkpointPreview?.active_tasks || 0) > 0} onClick={() => void exportCheckpoint()}>{checkpointBusy ? 'Đang tạo…' : 'Export checkpoint'}</button></div></div>
       <div className="checkpoint-disclosure">Checkpoint chứa Git history và dữ liệu dự án riêng tư. API/provider credentials, executable argv và đường dẫn máy này được loại bỏ; repositories/agents cần cấu hình lại sau restore. Restore tạo profile mới cạnh dữ liệu hiện tại; task cũ ở trạng thái blocked và cần kiểm tra trước khi chạy tiếp. RAG indexes sẽ cần dựng lại từ repositories. Git history được quét secret trước khi đóng gói.</div>
+      {profileStatus?.active && <div className="storage-alert warning"><b>{profileStatus.available ? 'Đang dùng restored profile' : 'Không tìm thấy restored profile đã chọn'}</b><span>{profileStatus.path || 'Profile path chưa đọc được'}</span><button className="button secondary" onClick={() => void resetDataProfile()}>Quay về dữ liệu ban đầu</button></div>}
+      {restoredDataDir && <div className="storage-alert warning"><b>Profile mới sẵn sàng</b><span>Kích hoạt sẽ đóng ứng dụng; lần mở lại tiếp theo dùng profile này. Dữ liệu hiện tại vẫn được giữ lại.</span><button className="button secondary" disabled={checkpointBusy} onClick={() => void activateRestoredProfile()}>Kích hoạt profile sau khi mở lại</button></div>}
       {checkpointPreview && <><div className="checkpoint-summary"><b>{checkpointPreview.repositories.length} repositories</b><span>{checkpointPreview.active_tasks} active tasks</span><span>{checkpointDirtyCount} uncommitted paths</span></div>
         {checkpointPreview.active_tasks > 0 && <div className="storage-alert warning"><b>Cần dừng task đang chạy</b><span>Checkpoint nhất quán chỉ được tạo khi không có task đang hoạt động.</span></div>}
         {checkpointPreview.repositories.length > 0 && <div className="checkpoint-repositories">{checkpointPreview.repositories.map(repo => <div className="checkpoint-repo" key={repo.id}><b>{repo.name}</b><small>{repo.default_branch}{repo.remote ? ` · ${repo.remote}` : ''}</small>{repo.dirty_paths.length > 0 && <small>Thay đổi chưa commit: {repo.dirty_paths.join(', ')}</small>}{repo.worktrees.map(worktree => worktree.dirty_paths.length > 0 && <small key={worktree.task_id}>Task {worktree.task_id.slice(0,8)}: {worktree.dirty_paths.join(', ')}</small>)}{repo.secret_paths?.length ? <small className="checkpoint-danger">Có thể có secret trong file thay đổi: {repo.secret_paths.join(', ')}</small> : null}{repo.scan_error && <small className="checkpoint-danger">{repo.scan_error}</small>}</div>)}</div>}

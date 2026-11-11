@@ -255,9 +255,11 @@ def _redact_remote(remote: str | None) -> str | None:
     value = remote.strip()
     if "://" not in value:
         # Only accept ordinary SCP-style SSH remotes; never persist a user or ssh option.
-        if not re.fullmatch(r"(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9.-]+:[A-Za-z0-9._/-]+", value):
+        match = re.fullmatch(r"(?:(?P<user>[A-Za-z0-9._-]+)@)?(?P<host>[A-Za-z0-9.-]+):(?P<path>[A-Za-z0-9._/-]+)", value)
+        if not match:
             return None
-        return value.split("@", 1)[-1]
+        user = "git@" if match.group("user") == "git" else ""
+        return f"{user}{match.group('host')}:{match.group('path')}"
     try:
         parts = urlsplit(value)
         port = parts.port
