@@ -20,6 +20,7 @@ MAX_RESPONSE_BYTES = 2_000_000
 MAX_REQUEST_BYTES = 4_000_000
 MAX_FILE_BYTES = 256_000
 MAX_TOTAL_READ_BYTES = 2_000_000
+MAX_LIST_WALK_ENTRIES = 10_000
 MAX_TOOL_CALLS = 60
 MAX_TURNS = 24
 MAX_RUNTIME_SECONDS = 30 * 60
@@ -70,6 +71,7 @@ class _ScopedFiles:
         self.agent_globs = agent_globs
         self.read_bytes = 0
         self.write_count = 0
+        self.list_walk_entries = 0
 
     def _path(self, raw: str, require_scope: bool = True) -> tuple[str, Path]:
         if not isinstance(raw, str) or not raw or len(raw) > 1000 or "\\" in raw or "\x00" in raw:
@@ -106,27 +108,52 @@ class _ScopedFiles:
 
     def list_files(self, directory: str = "") -> dict:
         if directory:
-            normalized, base = self._path(directory, require_scope=False)
+            _, base = self._path(directory, require_scope=False)
             if not base.is_dir():
                 raise ProviderWorkerError("Directory does not exist")
         else:
-            normalized, base = "", self.root
+            base = self.root
         result = []
-        for current, dirs, files in os.walk(base, followlinks=False):
-            current_path = Path(current)
-            dirs[:] = [name for name in dirs if name != ".git" and not (current_path / name).is_symlink()]
-            for name in files:
-                path = current_path / name
-                if path.is_symlink() or not path.is_file():
-                    continue
-                relative = path.relative_to(self.root).as_posix()
-                if self._sensitive_name(relative):
-                    continue
-                if in_scope(relative, self.task_globs) and in_scope(relative, self.agent_globs):
-                    result.append(relative)
-                    if len(result) >= 500:
-                        return {"files": sorted(result), "truncated": True}
-        return {"files": sorted(result), "truncated": False}
+        pending = [base]
+        truncated = False
+        while pending:
+            if self.list_walk_entries >= MAX_LIST_WALK_ENTRIES:
+                truncated = True
+                break
+            current = pending.pop()
+            self.list_walk_entries += 1
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        if self.list_walk_entries >= MAX_LIST_WALK_ENTRIES:
+                            truncated = True
+                            pending.clear()
+                            break
+                        self.list_walk_entries += 1
+                        try:
+                            if entry.is_symlink():
+                                continue
+                            if entry.is_dir(follow_symlinks=False):
+                                if entry.name != ".git":
+                                    pending.append(Path(entry.path))
+                                continue
+                            if not entry.is_file(follow_symlinks=False):
+                                continue
+                        except OSError:
+                            continue
+                        path = Path(entry.path)
+                        relative = path.relative_to(self.root).as_posix()
+                        if self._sensitive_name(relative):
+                            continue
+                        if in_scope(relative, self.task_globs) and in_scope(relative, self.agent_globs):
+                            result.append(relative)
+                            if len(result) >= 500:
+                                truncated = True
+                                pending.clear()
+                                break
+            except OSError:
+                continue
+        return {"files": sorted(result), "truncated": truncated}
 
     def read_file(self, raw_path: str) -> dict:
         relative, path = self._path(raw_path)

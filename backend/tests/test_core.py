@@ -698,6 +698,24 @@ def test_provider_worker_rejects_out_of_scope_symlinks_and_secret_paths(tmp_path
         files.write_file("src/generated.py", "api_key = 'fixture-secret-value-1234'\n")
 
 
+def test_provider_worker_bounds_file_listing_across_repeated_scans(tmp_path, monkeypatch):
+    from app import provider_worker
+    from app.provider_worker import _ScopedFiles
+
+    (tmp_path / "a.py").write_text("a = 1\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("b = 2\n", encoding="utf-8")
+    (tmp_path / "c.py").write_text("c = 3\n", encoding="utf-8")
+    monkeypatch.setattr(provider_worker, "MAX_LIST_WALK_ENTRIES", 2)
+    files = _ScopedFiles(str(tmp_path), ["*.py"], ["*.py"])
+
+    first = files.list_files()
+    second = files.list_files()
+
+    assert first["truncated"] is True
+    assert len(first["files"]) <= 1
+    assert second == {"files": [], "truncated": True}
+
+
 def test_cloud_provider_tasks_require_persisted_owner_consent_and_provider_agents_are_manual(tmp_path, monkeypatch):
     from app.scheduler import TaskScheduler
     from types import SimpleNamespace
