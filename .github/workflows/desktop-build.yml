@@ -31,13 +31,13 @@ jobs:
       NUITKA_BUILD_JOBS: 2
       CARGO_BUILD_JOBS: 2
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -47,7 +47,10 @@ jobs:
         working-directory: dashboard
       - run: npm run tauri -- build
         working-directory: dashboard
-      - uses: actions/upload-artifact@v4
+      - name: Smoke packaged backend sidecar
+        run: python ../scripts/smoke_desktop_backend.py src-tauri/binaries/devagent-backend-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }}
+        working-directory: dashboard
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.target }}
           path: dashboard/src-tauri/target/release/bundle/**
