@@ -227,6 +227,8 @@ Mỗi phase cần có: (a) API/schema/UX decision đã duyệt, (b) thay đổi 
 
 **Thứ tự thực hiện:** build/run sidecar tối thiểu → lifecycle/readiness/port discovery → data paths → Tauri permissions/dialog → API + WebSocket transport → onboarding → máy sạch smoke flow → đóng gói beta nội bộ.
 
+**Tiến độ thực thi (11/11/2026):** đã dựng Tauri v2 shell cho macOS arm64, backend sidecar Nuitka onefile, cấp cổng loopback động qua readiness `READY:<port>`, API token theo app data, retry frontend, native folder picker, single instance, PATH cho app mở từ Finder và dừng sidecar khi thoát. Đã build `.app` (29.83 MiB) và DMG (20.86 MiB); `cargo check`, frontend production build/lint và đóng gói Tauri đều pass. Smoke test trên máy hiện tại xác nhận app kết nối API, hộp chọn thư mục macOS mở được, đóng app không còn sidecar, mở lại kết nối được và thư mục DB/token vẫn còn. Backend suite chạy với ưu tiên CPU thấp: **50 passed**, 1 warning deprecation. **Cổng Phase 2 chưa nghiệm thu đầy đủ:** chưa chạy trên máy sạch; chưa kiểm tra chọn path chứa dấu/khoảng trắng; chưa chạy trọn luồng UI fixture repo → task → validation → full diff → complete local. Vì vậy hiện coi đây là alpha build nội bộ, chưa phải beta hoàn tất.
+
 ### Phase 3 — Fleet và quan sát
 
 **Công việc:** slot/run identity; API lưu/hot-apply enabled/capacity không bị refresh ghi đè; global max chạy/build và disk reservations; giới hạn dùng chung theo credential; giảm capacity theo cơ chế drain run hiện tại. UI fleet, task tabs, DAG, diff đầy đủ, reconnect log bằng event cursor và giới hạn bộ nhớ.

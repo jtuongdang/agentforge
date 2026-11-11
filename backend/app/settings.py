@@ -15,7 +15,7 @@ def default_data_dir() -> Path:
     configured = os.getenv("CLINIC_ORCHESTRATOR_DATA_DIR")
     if configured:
         return Path(configured).expanduser().resolve()
-    if not getattr(sys, "frozen", False):
+    if not getattr(sys, "frozen", False) and not globals().get("__compiled__"):
         return ROOT / "data"
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / APP_NAME

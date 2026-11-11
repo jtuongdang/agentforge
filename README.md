@@ -28,6 +28,10 @@ cd ~/Documents/ClinicOrchestrator
 
 The launcher creates `.venv`, installs the pinned Python requirements, starts FastAPI, and serves the Vite dashboard. The API binds to loopback (`127.0.0.1:8765` by default; override with `CLINIC_ORCHESTRATOR_HOST` and `CLINIC_ORCHESTRATOR_PORT`). Development data is under `data/`; packaged builds use the platform application data directory. Override it with `CLINIC_ORCHESTRATOR_DATA_DIR` or point SQLite at a specific file with `CLINIC_ORCHESTRATOR_DB`. Register any local Git checkout from the dashboard before creating tasks; startup does not assume a particular target project.
 
+## Desktop alpha (macOS)
+
+Install Node.js and Rust/Cargo on the build machine, then run `npm run desktop:dev` from `dashboard/` for the Tauri shell with a source Python backend. `npm run tauri build` runs the frontend build and `scripts/build_desktop_macos.sh`; that script compiles the backend into a self-contained Nuitka sidecar for the current macOS architecture. The packaged app uses a random loopback port and platform application data directory; the installed machine does not need Python, Node.js, or npm. Cross-architecture packages must be built separately on their target architecture.
+
 ## Safety boundaries
 
 - Each task selects a base branch (defaulting to the repository's configured default); the Agent gets a dedicated worktree and a meaningful task branch such as `orchestrator/fix-phone-validation`. The checked-out project directory remains untouched, and uncommitted changes are never copied into the worktree.

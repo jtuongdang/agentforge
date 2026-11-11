@@ -645,7 +645,7 @@ def history(limit: int = 100):
 
 
 DASHBOARD_DIST = Path(__file__).resolve().parents[2] / "dashboard" / "dist"
-if DASHBOARD_DIST.exists():
+if DASHBOARD_DIST.exists() and os.getenv("CLINIC_ORCHESTRATOR_HEADLESS") != "1":
     app.mount("/", StaticFiles(directory=str(DASHBOARD_DIST), html=True), name="dashboard")
 
 

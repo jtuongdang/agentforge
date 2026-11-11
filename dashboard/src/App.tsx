@@ -1,13 +1,29 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
+import { invoke, isTauri } from '@tauri-apps/api/core'
+import { open } from '@tauri-apps/plugin-dialog'
 import './App.css'
 
-const API = '/api'
+let apiBasePromise: Promise<string> | null = null
 let apiTokenPromise: Promise<string> | null = null
+
+async function getApiBase(): Promise<string> {
+  if (!isTauri()) return ''
+  if (!apiBasePromise) {
+    apiBasePromise = (async () => {
+      for (let attempt = 0; attempt < 80; attempt++) {
+        try { return await invoke<string>('backend_url') }
+        catch { await new Promise(resolve => window.setTimeout(resolve, 250)) }
+      }
+      throw new Error('Local backend did not become ready')
+    })().catch(error => { apiBasePromise = null; throw error })
+  }
+  return apiBasePromise
+}
 
 async function getApiToken(): Promise<string> {
   if (!apiTokenPromise) {
-    apiTokenPromise = fetch(`${API}/session`).then(async response => {
+    apiTokenPromise = getApiBase().then(base => fetch(`${base}/api/session`)).then(async response => {
       if (!response.ok) throw new Error('Local API session could not be established')
       const session = await response.json() as { access_token: string }
       return session.access_token
@@ -26,13 +42,16 @@ type StorageMetrics = { measured_at: string; data_bytes: number; categories: Rec
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const token = await getApiToken()
-  const response = await fetch(`${API}${path}`, { ...init, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...init?.headers } })
+  const base = await getApiBase()
+  const response = await fetch(`${base}/api${path}`, { ...init, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...init?.headers } })
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`
     try { const body = await response.json(); detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail) } catch { /* keep default */ }
     throw new Error(detail)
   }
-  return response.json() as Promise<T>
+  const contentType = response.headers.get('content-type') || ''
+  if (contentType.includes('application/json')) return response.json() as Promise<T>
+  return response.text() as Promise<T>
 }
 
 const date = (value?: string) => value ? new Date(value.replace(' ', 'T')).toLocaleString() : '—'
@@ -64,6 +83,16 @@ function App() {
   const [taskRepositoryId, setTaskRepositoryId] = useState('')
   const [taskBaseBranch, setTaskBaseBranch] = useState('')
   const [branchOptions, setBranchOptions] = useState<RepoBranch[]>([])
+
+  const pickRepositoryPath = async () => {
+    try {
+      const selectedPath = await open({ directory: true, multiple: false, title: 'Choose a Git repository folder' })
+      if (selectedPath && typeof selectedPath === 'string') {
+        const pathInput = document.querySelector<HTMLInputElement>('input[name="path"]')
+        if (pathInput) pathInput.value = selectedPath
+      }
+    } catch (e) { setError(e instanceof Error ? e.message : 'Folder picker could not be opened') }
+  }
 
   const refresh = useCallback(async () => {
     try {
@@ -106,7 +135,10 @@ function App() {
       try { existing = await api<EventRow[]>(`/tasks/${selected.id}/events`); setEvents(existing) } catch { /* task may have just been removed */ }
       const lastId = Math.max(0, ...existing.map(row => row.id))
       const socketTicket = await api<{ticket:string}>('/ws-ticket')
-      socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/tasks/${selected.id}/events?after=${lastId}&ticket=${encodeURIComponent(socketTicket.ticket)}`)
+      const base = await getApiBase()
+      const socketUrl = new URL(`/ws/tasks/${selected.id}/events?after=${lastId}&ticket=${encodeURIComponent(socketTicket.ticket)}`, base || location.origin)
+      socketUrl.protocol = socketUrl.protocol === 'https:' ? 'wss:' : 'ws:'
+      socket = new WebSocket(socketUrl)
       socket.onmessage = event => { const row = JSON.parse(event.data) as EventRow; setEvents(current => [...current, row]) }
     }
     void load()
@@ -156,13 +188,20 @@ function App() {
     event.preventDefault()
     const form = new FormData(event.currentTarget)
     try {
+      const validationProfile = String(form.get('validation_profile'))
+      const validationCommand = String(form.get('validation_command') || '').split('\n').map(s => s.trim()).filter(Boolean)
+      const preflight = await api<{base_error: string | null; warnings: string[]}>('/repositories/preflight', { method: 'POST', body: JSON.stringify({
+        path: form.get('path'), default_branch: form.get('default_branch'), validation_profile: validationProfile,
+        validation_command: validationCommand,
+      }) })
+      if (preflight.base_error) throw new Error(preflight.base_error)
       await api<Repo>('/repositories', { method: 'POST', body: JSON.stringify({
         name: form.get('name'), path: form.get('path'), default_branch: form.get('default_branch'),
-        validation_profile: form.get('validation_profile'),
-        validation_command: String(form.get('validation_command') || '').split('\n').map(s => s.trim()).filter(Boolean),
+        validation_profile: validationProfile, validation_command: validationCommand,
       }) })
       setShowRepoForm(false)
       await refresh()
+      if (preflight.warnings.length) setError(`Repository connected. Preflight: ${preflight.warnings.join(' ')}`)
     } catch (e) { setError(e instanceof Error ? e.message : 'Repository registration failed') }
   }
 
@@ -220,10 +259,11 @@ function App() {
       {error && <div className="toast-error"><span>!</span>{error}<button onClick={() => setError('')}>×</button></div>}
       <div className="page">
         <div className="page-heading"><div><div className="eyebrow">ENGINEERING CONTROL PLANE</div><h1>{nav === 'Overview' ? 'AI engineering workspace' : nav}</h1><p>{nav === 'Overview' ? 'Coordinate independent agents across your registered Git projects.' : pageDescription(nav)}</p></div>
-          {nav !== 'Contracts' && nav !== 'History' && nav !== 'Storage' && <button className="button primary" onClick={() => { const first = repos[0]; setTaskRepositoryId(first?.id || ''); setTaskBaseBranch(first?.default_branch || ''); setShowTaskForm(true) }}><span>＋</span> New task</button>}
+          {nav !== 'Contracts' && nav !== 'History' && nav !== 'Storage' && repos.length > 0 && <button className="button primary" onClick={() => { const first = repos[0]; setTaskRepositoryId(first?.id || ''); setTaskBaseBranch(first?.default_branch || ''); setShowTaskForm(true) }}><span>＋</span> New task</button>}
           {nav === 'Contracts' && <button className="button primary" onClick={() => setShowContractForm(true)}><span>＋</span> Propose contract</button>}
         </div>
         {nav === 'Overview' && <>
+          {repos.length === 0 && <section className="setup-wizard panel"><div><div className="eyebrow">FIRST RUN · STEP 1 OF 3</div><h2>Connect a project repository</h2><p>Choose a local Git checkout, review its base branch and validation setup, then add an Agent before scheduling your first task.</p></div><div className="setup-steps"><span className="current">1 · Repository</span><span>2 · Validation</span><span>3 · Agent</span></div><div className="setup-actions"><button className="button primary" onClick={() => setShowRepoForm(true)}>Choose repository</button><button className="button secondary" onClick={async () => { try { await api('/agents/refresh', { method: 'POST' }); await refresh() } catch (e) { setError(String(e)) } }}>Detect Agent CLIs</button></div></section>}
           <section className="stat-grid">
             <StatCard label="Active tasks" value={counts.active} note="Executing in isolated worktrees" icon="◷" tone="blue"/>
             <StatCard label="Need your review" value={counts.approval} note="Diff and validation ready" icon="◎" tone="amber"/>
@@ -259,7 +299,7 @@ function App() {
     </form></Modal>}
     {showContractForm && <Modal title="Propose an interface contract" subtitle="A reviewer must approve it before dependent work begins." onClose={() => setShowContractForm(false)}><form className="form" onSubmit={addContract}><label>Contract title<input name="title" required/></label><label>Interface and invariants<textarea name="body" minLength={10} rows={8} required placeholder="DTO/API shape, ownership, compatibility rules…"/></label><div className="modal-actions"><button type="button" className="button secondary" onClick={() => setShowContractForm(false)}>Cancel</button><button className="button primary">Save proposal</button></div></form></Modal>}
     {showAgentForm && <Modal title="Register an agent adapter" subtitle="Provide an executable command array or choose manual handoff." onClose={() => setShowAgentForm(false)}><form className="form" onSubmit={addAgent}><label>Agent name<input name="name" required/></label><label>Adapter<select name="adapter"><option value="exec">Generic CLI</option><option value="handoff">IDE manual handoff</option></select></label><label>Command tokens<textarea name="command" rows={3} placeholder={'For CLI, one argv token per line. No shell expansion.\nExample: /path/to/agent\n--workspace\n{worktree}'} /></label><label>Capabilities<input name="capabilities" placeholder="java, implementation, testing" required/></label><label>Allowed file globs<textarea name="globs" rows={2} defaultValue="**/*" required/></label><label>Concurrent tasks<input type="number" min="1" max="8" name="parallel" defaultValue="1"/></label><div className="modal-actions"><button type="button" className="button secondary" onClick={() => setShowAgentForm(false)}>Cancel</button><button className="button primary">Register</button></div></form></Modal>}
-    {showRepoForm && <Modal title="Add a project repository" subtitle="Register a local Git checkout so tasks can target it." onClose={() => setShowRepoForm(false)}><form className="form" onSubmit={addRepository}><label>Project name<input name="name" required maxLength={120} placeholder="My project"/></label><label>Local project path<input name="path" required placeholder="/Users/you/Documents/my-project"/><small>Use the folder path on this Mac. It must be inside a Git repository.</small></label><label>Default branch<input name="default_branch" defaultValue="main" required placeholder="main"/><small>Branch must already exist locally or as a fetched origin branch.</small></label><label>Validation profile<select name="validation_profile" defaultValue="auto"><option value="auto">Auto detect Maven</option><option value="maven">Maven</option><option value="python">Python (argv required)</option><option value="node">Node (argv required)</option><option value="go">Go (argv required)</option><option value="custom">Custom argv command</option></select><small>Auto mode detects only a root Maven project. Other profiles run the command shown below after task changes are reviewed.</small></label><label>Validator command arguments<textarea name="validation_command" rows={3} placeholder={'One argv item per line. Example for Python:\npython3\n-m\npytest'} /><small>Required for Python, Node, Go, and custom profiles. No shell expansion or dependency installation. Do not put secrets in command arguments.</small></label><div className="form-note">The selected checkout stays unchanged; task worktrees use only committed base content.</div><div className="modal-actions"><button type="button" className="button secondary" onClick={() => setShowRepoForm(false)}>Cancel</button><button className="button primary">Add repository</button></div></form></Modal>}
+    {showRepoForm && <Modal title="Add a project repository" subtitle="Register a local Git checkout so tasks can target it." onClose={() => setShowRepoForm(false)}><form className="form" onSubmit={addRepository}><label>Project name<input name="name" required maxLength={120} placeholder="My project"/></label><label>Local project path<input name="path" required placeholder="/Users/you/Documents/my-project"/>{isTauri() && <button type="button" className="button secondary" onClick={() => void pickRepositoryPath()}>Browse folders…</button>}<small>Choose a folder inside a Git repository. Preflight checks the selected base, dirty state, disk space and configured tools.</small></label><label>Default branch<input name="default_branch" defaultValue="main" required placeholder="main"/><small>Branch must already exist locally or as a fetched origin branch.</small></label><label>Validation profile<select name="validation_profile" defaultValue="auto"><option value="auto">Auto detect Maven</option><option value="maven">Maven</option><option value="python">Python (argv required)</option><option value="node">Node (argv required)</option><option value="go">Go (argv required)</option><option value="custom">Custom argv command</option></select><small>Auto mode detects only a root Maven project. Other profiles run the command shown below after task changes are reviewed.</small></label><label>Validator command arguments<textarea name="validation_command" rows={3} placeholder={'One argv item per line. Example for Python:\npython3\n-m\npytest'} /><small>Required for Python, Node, Go, and custom profiles. No shell expansion or dependency installation. Do not put secrets in command arguments.</small></label><div className="form-note">The selected checkout stays unchanged; task worktrees use only committed base content.</div><div className="modal-actions"><button type="button" className="button secondary" onClick={() => setShowRepoForm(false)}>Cancel</button><button className="button primary">Add repository</button></div></form></Modal>}
     {approval && <ApprovalModal task={approval} onClose={() => setApproval(null)} onApprove={text => void approvePr(approval, text)}/>}
   </div>
 }
@@ -304,7 +344,7 @@ function TaskDetails({task,events}:{task:Task;events:EventRow[]}) { return <div 
   <div className="detail-section"><h3>Live activity <span className="live-indicator"/></h3><div className="timeline">{events.slice(-30).map(event => <div className="event-row" key={event.id}><span className="event-dot"/><div><b>{event.kind.replaceAll('_',' ')}</b><p>{event.message}</p><small>{date(event.created_at)}</small></div></div>)}</div></div>
   </div> }
 function isGitHubRemote(remote?:string|null) { if (!remote) return false; try { return new URL(remote).hostname.toLowerCase() === 'github.com' } catch { return /^(?:[^@/]+@)?github\.com:/i.test(remote) } }
-function TaskActions({task,onApprove,onCompleteLocal,onCancel,onHandoff}:{task:Task;onApprove:()=>void;onCompleteLocal:()=>void;onCancel:()=>void;onHandoff:()=>void}) { return <div className="task-actions">{task.status === 'awaiting_pr_approval' && isGitHubRemote(task.repository_remote) && <button className="button primary" onClick={onApprove}>Review & approve Draft PR</button>}{task.status === 'awaiting_pr_approval' && <button className="button secondary" onClick={onCompleteLocal}>Hoàn tất cục bộ</button>}{task.status === 'awaiting_pr_approval' && !isGitHubRemote(task.repository_remote) && <span className="hint">Repository không có remote GitHub; có thể hoàn tất cục bộ.</span>}{task.status === 'handoff_ready' && <><a className="button secondary" href={`${API}/tasks/${task.id}/handoff`} target="_blank" rel="noreferrer">Open handoff package</a><button className="button primary" onClick={onHandoff}>Submit IDE completion</button></>}{['queued','waiting_for_contract','waiting_for_scope','running','planning','assigned','validating','recovering'].includes(task.status) && <button className="button danger-outline" onClick={onCancel}>Cancel run</button>}{task.pr_url && <a className="button secondary" href={task.pr_url} target="_blank" rel="noreferrer">Open Draft PR ↗</a>}</div> }
+function TaskActions({task,onApprove,onCompleteLocal,onCancel,onHandoff}:{task:Task;onApprove:()=>void;onCompleteLocal:()=>void;onCancel:()=>void;onHandoff:()=>void}) { return <div className="task-actions">{task.status === 'awaiting_pr_approval' && isGitHubRemote(task.repository_remote) && <button className="button primary" onClick={onApprove}>Review & approve Draft PR</button>}{task.status === 'awaiting_pr_approval' && <button className="button secondary" onClick={onCompleteLocal}>Hoàn tất cục bộ</button>}{task.status === 'awaiting_pr_approval' && !isGitHubRemote(task.repository_remote) && <span className="hint">Repository không có remote GitHub; có thể hoàn tất cục bộ.</span>}{task.status === 'handoff_ready' && <><button className="button secondary" onClick={async () => { try { const text = await api<string>(`/tasks/${task.id}/handoff`); const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown' })); const link = document.createElement('a'); link.href = url; link.download = `handoff-${task.id}.md`; link.click(); URL.revokeObjectURL(url) } catch (e) { window.alert(e instanceof Error ? e.message : 'Could not download handoff package') } }}>Download handoff package</button><button className="button primary" onClick={onHandoff}>Submit IDE completion</button></>}{['queued','waiting_for_contract','waiting_for_scope','running','planning','assigned','validating','recovering'].includes(task.status) && <button className="button danger-outline" onClick={onCancel}>Cancel run</button>}{task.pr_url && <a className="button secondary" href={task.pr_url} target="_blank" rel="noreferrer">Open Draft PR ↗</a>}</div> }
 function History({tasks,onSelect}:{tasks:Task[];onSelect:(task:Task)=>void}) { return <div className="panel"><div className="panel-heading"><div><h2>Task history</h2><p>Committed work and execution outcomes.</p></div></div><TaskTable tasks={tasks} onSelect={onSelect}/></div> }
 function Empty({title,text}:{title:string;text:string}) { return <div className="empty"><div className="empty-icon">⌁</div><b>{title}</b><p>{text}</p></div> }
 function Modal({title,subtitle,onClose,children}:{title:string;subtitle:string;onClose:()=>void;children:ReactNode}) { return <div className="modal-shade" onMouseDown={e => e.target === e.currentTarget && onClose()}><section className="modal"><div className="modal-head"><div><h2>{title}</h2><p>{subtitle}</p></div><button className="icon-btn" onClick={onClose}>×</button></div>{children}</section></div> }
