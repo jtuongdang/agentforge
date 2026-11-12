@@ -1670,7 +1670,7 @@ def test_agent_api_check_and_remove_keep_agent_history(tmp_path, monkeypatch):
         assert restored.json()["enabled"] is True
 
 
-def test_registry_discovers_authenticated_copilot_cli(tmp_path, monkeypatch):
+def test_registry_discovery_does_not_infer_copilot_authentication(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "registry.sqlite3")
     db.init_db()
     monkeypatch.setattr("app.registry.shutil.which", lambda name: f"/usr/local/bin/{name}" if name in {"codex", "copilot"} else None)
@@ -1682,7 +1682,8 @@ def test_registry_discovers_authenticated_copilot_cli(tmp_path, monkeypatch):
     by_id = {agent["id"]: agent for agent in agents}
     assert by_id["codex-local"]["available"] is True
     assert by_id["copilot-cli"]["adapter"] == "copilot"
-    assert by_id["copilot-cli"]["available"] is True
+    assert by_id["copilot-cli"]["available"] is False
+    assert by_id["copilot-cli"]["credential_status"] == "unchecked"
     assert by_id["copilot-cli"]["max_parallel"] == 1
 
 
@@ -1706,49 +1707,22 @@ def test_registry_discovers_antigravity_cli_in_its_default_install_location(tmp_
     by_id = {agent["id"]: agent for agent in agents}
     assert by_id["antigravity-cli"]["adapter"] == "antigravity"
     assert by_id["antigravity-cli"]["command"] == [str(agy)]
-    assert by_id["antigravity-cli"]["available"] is True
+    assert by_id["antigravity-cli"]["available"] is False
     assert "antigravity-ide" not in by_id
 
 
-def test_copilot_adapter_runs_noninteractive_without_trusting_repo(tmp_path, monkeypatch):
+def test_copilot_automatic_execution_blocks_until_permission_acceptance(tmp_path, monkeypatch):
     import asyncio
     from app.engine import AgentExecutionEngine
 
-    captured = {}
+    async def forbidden(*args, **kwargs):
+        pytest.fail("Copilot must not start with unrestricted tool approval")
 
-    class FakeOutput:
-        async def readline(self):
-            return b""
-
-    class FakeProcess:
-        stdout = FakeOutput()
-        returncode = 0
-
-        async def wait(self):
-            return 0
-
-    async def fake_create(*args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return FakeProcess()
-
-    async def run_adapter():
-        engine = object.__new__(AgentExecutionEngine)
-        monkeypatch.setattr("app.engine.create_managed_process", fake_create)
-        monkeypatch.setattr("app.engine.log_event", lambda *args, **kwargs: None)
-        return await engine._invoke({"adapter": "copilot", "command": ["/usr/local/bin/copilot"], "id": "copilot-cli"},
-                                    str(tmp_path), tmp_path / "TASK.md", "synthetic prompt", "task-fixture")
-
-    assert asyncio.run(run_adapter()) == 0
-    args = captured["args"]
-    assert args[0] == "/usr/local/bin/copilot"
-    assert "--prompt" in args and "synthetic prompt" in args
-    assert "--allow-all-tools" in args
-    assert "--disable-builtin-mcps" in args
-    assert "--disable-client-telemetry" in args
-    assert "--trust-folder" not in args
-    assert "--allow-all-paths" not in args
-    assert captured["kwargs"]["cwd"] == str(tmp_path)
+    monkeypatch.setattr("app.engine.create_managed_process", forbidden)
+    engine = object.__new__(AgentExecutionEngine)
+    with pytest.raises(RuntimeError, match="scoped-tool/sandbox"):
+        asyncio.run(engine._invoke({"adapter": "copilot", "command": ["/fixture/copilot"], "id": "copilot-cli"},
+            str(tmp_path), tmp_path / "TASK.md", "synthetic prompt", "fixture"))
 
 
 def test_antigravity_adapter_uses_headless_sandbox_and_accept_edits(tmp_path, monkeypatch):

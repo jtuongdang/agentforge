@@ -17,7 +17,7 @@ Local, SQLite-backed multi-agent orchestration for registered Git repositories. 
 
 The initially surveyed Java repository had 13 local modifications at survey time. This project does not modify, stage, reset, or clean that working tree. Its worker uses separate Git worktrees from committed refs.
 
-Codex, GitHub Copilot and Antigravity are registered for automatic execution and can run independent tasks concurrently in separate worktrees. Copilot's command sandbox is enabled in the user's global Copilot settings. Antigravity runs with its per-session terminal sandbox and `accept-edits` mode; task-scoped permission rules allow Maven commands but deny Git publishing, MCP, external URLs, and destructive commands. The account reported `auto` mode unavailable, so the adapter does not request it or bypass permissions.
+Codex and Antigravity can run tasks after their supported credential check succeeds. Copilot browser login and an explicit paid credential probe are available, but automatic Copilot execution is paused pending scoped-tool/sandbox acceptance; global CLI settings do not establish a safe boundary for a new installation. Antigravity runs with its per-session terminal sandbox and `accept-edits` mode; task-scoped permission rules allow Maven commands but deny Git publishing, MCP, external URLs, and destructive commands. The account reported `auto` mode unavailable, so the adapter does not request it or bypass permissions.
 
 ## Run locally
 
@@ -55,6 +55,31 @@ credentials and test data are not packaged into the Desktop app.
 
 See [Desktop installation and recovery](docs/DESKTOP_INSTALL.md) for package
 selection, checksum verification, first launch and backup instructions.
+
+## Account and CLI connections (source upgrade)
+
+The Overview first-run panel and Agents page offer official browser sign-in for
+Codex, Copilot and GitHub CLI. No login or model prompt is started merely by
+opening the panel. The selected CLI opens the system browser; GitHub's one-time
+code is shown temporarily and cleared on completion/cancel/expiry. CLI output
+and credentials are not stored in AgentForge events or browser storage. Codex
+login requires keyring storage; Copilot/GitHub require an explicit acknowledgment
+of their own file-storage fallback, and automatic login is blocked if the OS
+credential store is unavailable or GitHub environment tokens override OAuth.
+Existing sessions can be checked separately. Antigravity currently requires its
+official app/CLI sign-in; no unsupported login command is invented.
+
+Google AgentForge identity, broker sessions and per-user profiles remain under
+implementation; CLI login does not fulfill Google verification. See the
+[approved linking proposal](docs/DESKTOP_ACCOUNT_AGENT_LINKING_PROPOSAL.md) and
+[current implementation checkpoint](docs/ACCOUNT_LINKING_PROGRESS.md). The
+published alpha.1 installers predate this source upgrade.
+
+License Hub + user/license/device admin is published at
+[Docker Hub](https://hub.docker.com/r/jtuongdev/agentforge-admin), tag
+`0.1.0-admin.1`, for Linux amd64/arm64. Follow the
+[self-deployment guide](deploy/license-hub/README.md); this image has admin user
+profiles, without Google Desktop login.
 
 ## Safety boundaries
 

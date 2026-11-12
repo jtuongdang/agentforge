@@ -28,8 +28,8 @@ class AgentRegistry:
             agents.append({
                 "id": "copilot-cli", "name": "GitHub Copilot CLI", "adapter": "copilot", "command": [copilot_cli],
                 "capabilities": ["analysis", "implementation", "documentation", "refactoring", "java", "python", "react", "typescript", "testing"],
-                "file_globs": ["**/*"], "max_parallel": 1, "available": True,
-                "availability_note": f"{version}; authentication is checked by the first non-interactive task",
+                "file_globs": ["**/*"], "max_parallel": 1, "available": False,
+                "availability_note": f"{version}; installed; authentication and worker permission policy need verification",
             })
         antigravity_cli = shutil.which("agy")
         if not antigravity_cli:
@@ -41,8 +41,8 @@ class AgentRegistry:
             agents.append({
                 "id": "antigravity-cli", "name": "Google Antigravity CLI", "adapter": "antigravity", "command": [antigravity_cli],
                 "capabilities": ["analysis", "implementation", "documentation", "refactoring", "java", "python", "react", "typescript", "testing"],
-                "file_globs": ["**/*"], "max_parallel": 1, "available": True,
-                "availability_note": f"Antigravity CLI {version}; headless authentication validated",
+                "file_globs": ["**/*"], "max_parallel": 1, "available": False,
+                "availability_note": f"Antigravity CLI {version}; installed; credential check required",
             })
         # IDE adapters are present as dispatch targets only when the local app/plugin is observed.
         antigravity = Path("/Applications/Antigravity.app").exists()
@@ -67,7 +67,10 @@ class AgentRegistry:
                     VALUES(?,?,?,?,?,?,?,1,?,?,CURRENT_TIMESTAMP)
                     ON CONFLICT(id) DO UPDATE SET name=excluded.name,adapter=excluded.adapter,command=excluded.command,
                     capabilities=excluded.capabilities,file_globs=excluded.file_globs,max_parallel=excluded.max_parallel,
-                    available=excluded.available,availability_note=excluded.availability_note,last_seen=CURRENT_TIMESTAMP""",
+                    available=CASE WHEN agents.command=excluded.command AND excluded.adapter='antigravity'
+                        AND agents.credential_status='valid' THEN 1 ELSE excluded.available END,
+                    credential_status=CASE WHEN agents.command=excluded.command THEN agents.credential_status ELSE 'unchecked' END,
+                    availability_note=excluded.availability_note,last_seen=CURRENT_TIMESTAMP""",
                     (agent["id"], agent["name"], agent["adapter"], db.dumps(agent["command"]),
                      db.dumps(agent["capabilities"]), db.dumps(agent["file_globs"]), agent["max_parallel"],
                      int(agent["available"]), agent["availability_note"]))
@@ -91,8 +94,7 @@ class AgentRegistry:
     def _auth_status(executable: str) -> tuple[bool, str]:
         try:
             result = subprocess.run([executable, "login", "status"], capture_output=True, text=True, timeout=8, check=False)
-            detail = (result.stdout or result.stderr).strip().splitlines()[0:1]
-            return result.returncode == 0, detail[0][:160] if detail else "Login status unavailable"
+            return result.returncode == 0, "CLI reports signed in" if result.returncode == 0 else "CLI sign-in required"
         except (OSError, subprocess.TimeoutExpired):
             return False, "CLI authentication check timed out or failed"
 
@@ -118,8 +120,11 @@ class AgentRegistry:
         status, note, usage = self._probe_credentials(agent)
         with db.transaction() as con:
             con.execute("""UPDATE agents SET credential_status=?, credential_checked_at=?,
-                credential_note=?, credential_usage=? WHERE id=?""",
-                (status, datetime.now(timezone.utc).isoformat(timespec="seconds"), note[:300], db.dumps(usage), agent_id))
+                credential_note=?, credential_usage=?,
+                available=CASE WHEN adapter IN ('codex','antigravity') THEN ?
+                    WHEN adapter='copilot' THEN 0 ELSE available END WHERE id=?""",
+                (status, datetime.now(timezone.utc).isoformat(timespec="seconds"), note[:300], db.dumps(usage),
+                 int(status == "valid"), agent_id))
         return self.get(agent_id)
 
     @classmethod
@@ -200,8 +205,9 @@ class AgentRegistry:
     def register(self, agent: dict) -> dict:
         if agent["adapter"] in {"exec", "copilot", "antigravity", "codex"}:
             executable = agent["command"][0] if agent["command"] else ""
-            agent["available"] = bool(executable and shutil.which(executable))
-            note = "Configured command detected" if agent["available"] else "Configured executable was not found on PATH"
+            installed = bool(executable and shutil.which(executable))
+            agent["available"] = installed and agent["adapter"] == "exec"
+            note = "Configured command detected; credential verification required" if installed else "Configured executable was not found on PATH"
         else:
             agent["available"] = agent["adapter"] != "handoff"
             note = "Configured by operator"
@@ -220,4 +226,7 @@ class AgentRegistry:
         agent["credential_usage"] = db.json.loads(agent.get("credential_usage") or "{}")
         agent["enabled"] = bool(agent["enabled"])
         agent["available"] = bool(agent["available"])
+        agent["connection_state"] = ("ready" if agent["available"] else
+            "authenticated_policy_pending" if agent["adapter"] == "copilot" and agent["credential_status"] == "valid" else
+            "sign_in_required" if agent["credential_status"] == "invalid" else "unverified")
         return agent

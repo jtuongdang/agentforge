@@ -4,6 +4,15 @@ Ngày khảo sát ban đầu: **11/11/2026**. Ngày rà soát bổ sung: **11/11
 
 Trạng thái: **đang triển khai theo phase** trên nhánh `codex/desktop-upgrade`, đồng bộ với repository `jtuongdang/agentforge`. Phần khảo sát ban đầu dưới đây được giữ làm lịch sử; tiến độ thực thi cập nhật ở mục Phase 0. Tài liệu này phân biệt yêu cầu trong spec, bằng chứng từ mã nguồn và quyết định kiến trúc đề xuất. Mã nguồn được dẫn theo phiên bản đang có trong workspace; số dòng có thể thay đổi sau refactor.
 
+### Kết nối tài khoản — cập nhật 12/11/2026
+
+Owner đã duyệt mở rộng G1–G5 trong [proposal](DESKTOP_ACCOUNT_AGENT_LINKING_PROPOSAL.md).
+Tiến độ mới, cổng nghiệm thu và thứ tự tiếp theo nằm ở
+[ACCOUNT_LINKING_PROGRESS.md](ACCOUNT_LINKING_PROGRESS.md). Docker admin đã publish;
+source Desktop có browser login CLI. Google broker/session/profile chưa hoàn tất,
+Copilot worker đang tạm dừng để nghiệm thu quyền; không coi toàn bộ Phase 0–8 là
+đã hoàn thành production chỉ dựa trên bộ cài alpha.
+
 ### Đóng gói nội bộ — cập nhật 12/11/2026
 
 Mức đáp ứng chức năng hiện hành và kiểm thử chạy lại được tổng hợp trong

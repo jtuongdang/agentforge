@@ -8,7 +8,18 @@ Ngày kiểm tra: **12/11/2026**. Mã nguồn đối chiếu: `5bc01db` trên nh
 README, project conventions, mã nguồn và kiểm thử. Báo cáo này mô tả hiện trạng;
 các đoạn khảo sát/tiến độ cũ trong upgrade plan được giữ làm lịch sử.
 
-## 1. Kết quả thống kê
+## Cập nhật triển khai sau snapshot `5bc01db`
+
+Đọc [ACCOUNT_LINKING_PROGRESS.md](ACCOUNT_LINKING_PROGRESS.md) cho hiện trạng mới.
+Docker admin đã xuất bản cho amd64/arm64. Source Desktop đã có luồng browser login
+CLI và bỏ suy đoán đã xác thực khi chỉ phát hiện executable. Copilot tự động tạm
+dừng để nghiệm thu quyền file/tool; bản cài alpha.1 vẫn là snapshot cũ.
+
+Owner sau đó đã duyệt Google xác minh tài khoản AgentForge, giữ trial 14 ngày
+theo thiết bị. Google broker/session/profile chưa hoàn tất; không được dùng quyết
+định cũ “không cần Google login” để đóng yêu cầu đăng nhập hiện hành.
+
+## 1. Kết quả thống kê tại snapshot `5bc01db`
 
 | Phân loại | Số nhóm | Ý nghĩa |
 |---|---:|---|
@@ -83,9 +94,9 @@ Biên dịch Nuitka và Rust đã có trong đóng gói. Điều đó không ch�
 
 ## 5. Nhóm D — Quyết định đã thay đổi
 
-**D30 — Google account/login cho trial:** owner đã chọn trial **14 ngày gắn thiết bị**,
-không dùng Google login. Vì vậy thiếu Google login không phải lỗi so với quyết định
-triển khai hiện hành. Đây vẫn là khác biệt so với §18.2 của spec ban đầu.
+**D30 — Trial 14 ngày gắn thiết bị:** quyết định này vẫn giữ. Owner đã duyệt bổ sung
+Google xác minh tài khoản trong proposal G1–G5; Google không reset trial. Yêu cầu
+Google login hiện còn phải triển khai/nghiệm thu, xem cập nhật ở đầu tài liệu.
 
 ## 6. Kết quả kiểm tra và phạm vi bằng chứng
 

@@ -346,12 +346,8 @@ class AgentExecutionEngine:
                     "--sandbox", "workspace-write", "--ephemeral", "-"]
             stdin_text = prompt
         elif agent["adapter"] == "copilot":
-            executable = command[0] if command else shutil.which("copilot")
-            if not executable:
-                raise RuntimeError("GitHub Copilot CLI is not installed")
-            args = [executable, "--prompt", prompt, "--silent", "--output-format", "json",
-                    "--disable-builtin-mcps", "--disable-client-telemetry", "--allow-all-tools"]
-            stdin_text = None
+            raise RuntimeError("Copilot automatic execution is paused pending scoped-tool/sandbox acceptance. "
+                               "Use IDE handoff or another verified worker; CLI login remains available.")
         elif agent["adapter"] == "antigravity":
             executable = command[0] if command else shutil.which("agy")
             if not executable:

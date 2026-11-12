@@ -4,7 +4,11 @@ Ngày: **12/11/2026**. Trạng thái: **owner đã duyệt toàn bộ phương �
 Đây là kịch bản sản phẩm và các cổng nghiệm thu đề xuất. Phần Docker admin
 license/thiết bị/hồ sơ người dùng đang được hoàn thiện theo yêu cầu riêng.
 
-## 1. Hiện trạng kiểm tra được từ mã nguồn
+Cập nhật thực thi: [ACCOUNT_LINKING_PROGRESS.md](ACCOUNT_LINKING_PROGRESS.md).
+Các bảng hiện trạng bên dưới là khảo sát trước triển khai: source mới đã có
+wizard/browser login CLI, Copilot worker tạm dừng thay vì dùng `--allow-all-tools`.
+
+## 1. Hiện trạng kiểm tra được từ mã nguồn (snapshot trước triển khai)
 
 | Thành phần | Đã có | Thiếu/điểm cần sửa |
 |---|---|---|

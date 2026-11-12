@@ -8,6 +8,7 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -25,6 +26,7 @@ from . import portability
 from . import providers
 from . import tech_lead
 from . import remote_pairing
+from .agent_login import agent_login
 from .license import LicenseConsentRequired, LicenseUnavailable, license_service
 from .engine import get_task, log_event, set_task
 from . import fleet as fleet_manager
@@ -159,6 +161,7 @@ async def lifespan(_: FastAPI):
     worker = asyncio.create_task(orchestrator.start())
     license_worker = asyncio.create_task(license_service.refresh_loop())
     yield
+    await agent_login.cancel()
     await orchestrator.stop()
     worker.cancel()
     license_worker.cancel()
@@ -203,7 +206,11 @@ async def require_local_api_token(request, call_next):
         if not hmac.compare_digest(supplied, expected):
             from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "Local API token required"}, status_code=401)
-    return await call_next(request)
+    response = await call_next(request)
+    if request.url.path.startswith("/api/connections/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @app.get("/api/session")
@@ -844,6 +851,24 @@ def prune_event_log(dry_run: bool = False):
 @app.get("/api/agents")
 def agents():
     return registry.list()
+
+
+@app.get("/api/connections/login")
+def cli_login_status():
+    return agent_login.status()
+
+
+@app.post("/api/connections/{provider}/login")
+async def start_cli_login(provider: str, acknowledge_storage_risk: bool = False):
+    try:
+        return await agent_login.start(provider, acknowledge_storage_risk)
+    except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        raise HTTPException(400, str(exc) if isinstance(exc, ValueError) else "CLI capability probe failed") from None
+
+
+@app.delete("/api/connections/login")
+async def cancel_cli_login():
+    return await agent_login.cancel()
 
 
 @app.get("/api/providers")
