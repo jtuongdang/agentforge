@@ -23,7 +23,7 @@ async function remoteFetch<T>(path: string, token?: string, init?: RequestInit):
 }
 
 export default function RemoteViewer() {
-  const [code, setCode] = useState('')
+  const [code, setCode] = useState(() => new URLSearchParams(window.location.hash.slice(1)).get('pairing') ?? '')
   const [deviceName, setDeviceName] = useState('')
   const [pairRequest, setPairRequest] = useState<PairRequest | null>(null)
   const [device, setDevice] = useState<RemoteDevice | null>(null)
@@ -37,6 +37,11 @@ export default function RemoteViewer() {
   const wsSocket = useRef<WebSocket | null>(null)
   const wsRetryDelay = useRef(1000)
   const wsRetryTimer = useRef(0)
+
+  useEffect(() => {
+    if (!code) return
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}`)
+  }, [code])
 
   const refresh = useCallback(async (token: string) => {
     const result = await remoteFetch<{ tasks: RemoteTask[] }>('/tasks', token)
