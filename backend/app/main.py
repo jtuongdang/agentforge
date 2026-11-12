@@ -1244,26 +1244,47 @@ def history(limit: int = 100):
 
 
 DASHBOARD_DIST = Path(__file__).resolve().parents[2] / "dashboard" / "dist"
-if DASHBOARD_DIST.is_dir():
-    @app.get("/remote", include_in_schema=False)
-    @app.get("/remote/", include_in_schema=False)
-    def remote_viewer_index(request: Request):
-        if not remote_pairing.trusted_ingress_peer_allowed(request):
-            raise HTTPException(403, "Remote HTTPS ingress is not configured or request boundary is invalid")
-        index = DASHBOARD_DIST / "index.html"
-        if not index.is_file():
-            raise HTTPException(404, "Remote viewer bundle is unavailable")
-        html = index.read_text(encoding="utf-8")
-        html = html.replace('src="/assets/', 'src="/remote/assets/').replace(
-            'href="/assets/', 'href="/remote/assets/')
-        return HTMLResponse(html, headers={
-            "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
-            "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-                                       "connect-src 'self' wss:; img-src 'self' data:; object-src 'none'; "
-                                       "base-uri 'none'; frame-ancestors 'none'",
-        })
+@app.get("/remote", include_in_schema=False)
+@app.get("/remote/", include_in_schema=False)
+def remote_viewer_index(request: Request):
+    if not remote_pairing.trusted_ingress_peer_allowed(request):
+        raise HTTPException(403, "Remote HTTPS ingress is not configured or request boundary is invalid")
+    index = DASHBOARD_DIST / "index.html"
+    if not index.is_file():
+        raise HTTPException(404, "Remote viewer bundle is unavailable")
+    html = index.read_text(encoding="utf-8")
+    html = html.replace('src="/assets/', 'src="/remote/assets/').replace(
+        'href="/assets/', 'href="/remote/assets/').replace(
+        'href="/favicon.svg"', 'href="/remote/assets/favicon.svg"')
+    return HTMLResponse(html, headers={
+        "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                                   "connect-src 'self' wss:; img-src 'self' data:; object-src 'none'; "
+                                   "base-uri 'none'; frame-ancestors 'none'",
+    })
 
-    app.mount("/remote/assets", StaticFiles(directory=str(DASHBOARD_DIST / "assets")), name="remote-assets")
+@app.get("/remote/assets/favicon.svg", include_in_schema=False)
+def remote_viewer_favicon(request: Request):
+    if not remote_pairing.trusted_ingress_peer_allowed(request):
+        raise HTTPException(403, "Remote HTTPS ingress is not configured or request boundary is invalid")
+    favicon = DASHBOARD_DIST / "favicon.svg"
+    if not favicon.is_file():
+        raise HTTPException(404, "Remote viewer favicon is unavailable")
+    return FileResponse(favicon, headers={"Cache-Control": "public, max-age=86400"})
+
+@app.get("/remote/assets/{asset_path:path}", include_in_schema=False)
+def remote_viewer_asset(asset_path: str, request: Request):
+    if not remote_pairing.trusted_ingress_peer_allowed(request):
+        raise HTTPException(403, "Remote HTTPS ingress is not configured or request boundary is invalid")
+    asset_root = (DASHBOARD_DIST / "assets").resolve()
+    try:
+        asset = (asset_root / asset_path).resolve(strict=True)
+        asset.relative_to(asset_root)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(404, "Remote viewer asset is unavailable") from exc
+    if not asset.is_file():
+        raise HTTPException(404, "Remote viewer asset is unavailable")
+    return FileResponse(asset, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 if DASHBOARD_DIST.exists() and os.getenv("CLINIC_ORCHESTRATOR_HEADLESS") != "1":
     app.mount("/", StaticFiles(directory=str(DASHBOARD_DIST), html=True), name="dashboard")

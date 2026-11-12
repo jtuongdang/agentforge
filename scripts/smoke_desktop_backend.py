@@ -193,7 +193,13 @@ def main() -> int:
                 remote_html = response.read().decode("utf-8")
                 if response.status != 200 or "DevAgent Remote Review" not in remote_html:
                     raise RuntimeError("Packaged remote browser viewer did not load from the gateway")
-            asset = re.search(r'(?:src|href)="/remote/assets/([^\"]+)"', remote_html)
+            if 'href="/remote/assets/favicon.svg"' not in remote_html:
+                raise RuntimeError("Remote viewer HTML does not route its favicon through the allowed prefix")
+            with urlopen(Request(f"http://127.0.0.1:{gateway_port}/remote/assets/favicon.svg",
+                                 headers=ingress_headers), timeout=5) as response:
+                if response.status != 200 or b"<svg" not in response.read():
+                    raise RuntimeError("Packaged remote viewer favicon did not load")
+            asset = re.search(r'src="/remote/assets/([^\"]+)"', remote_html)
             if asset is None:
                 raise RuntimeError("Remote viewer HTML does not reference gateway-scoped assets")
             with urlopen(Request(f"http://127.0.0.1:{gateway_port}/remote/assets/{asset.group(1)}",

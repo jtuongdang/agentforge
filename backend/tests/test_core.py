@@ -2580,6 +2580,39 @@ def test_remote_ingress_requires_exact_https_origin_and_trusted_proxy(monkeypatc
     assert remote_pairing.ingress_request_allowed(request({"host":"review.example.invalid", "x-forwarded-proto":"https"}, method="GET")) is False
 
 
+def test_remote_viewer_bundle_and_assets_require_trusted_ingress(tmp_path, monkeypatch):
+    from app import main as main_module
+    from app import remote_pairing
+
+    distribution = tmp_path / "dashboard-dist"
+    assets = distribution / "assets"
+    assets.mkdir(parents=True)
+    (distribution / "index.html").write_text(
+        '<script src="/assets/app.js"></script><link href="/assets/app.css">'
+        '<link rel="icon" href="/favicon.svg">', encoding="utf-8")
+    (distribution / "favicon.svg").write_text("<svg></svg>", encoding="utf-8")
+    (assets / "app.js").write_text("window.remoteViewer = true", encoding="utf-8")
+    (assets / "app.css").write_text(".remote { color: blue }", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("not an asset", encoding="utf-8")
+    monkeypatch.setattr(main_module, "DASHBOARD_DIST", distribution)
+    monkeypatch.setattr(remote_pairing, "trusted_ingress_peer_allowed",
+                        lambda request: request.headers.get("x-test-ingress") == "trusted")
+
+    with TestClient(main_module.app) as client:
+        assert client.get("/remote").status_code == 403
+        headers = {"X-Test-Ingress": "trusted"}
+        viewer = client.get("/remote", headers=headers)
+        assert viewer.status_code == 200
+        assert 'src="/remote/assets/app.js"' in viewer.text
+        assert 'href="/remote/assets/app.css"' in viewer.text
+        assert 'href="/remote/assets/favicon.svg"' in viewer.text
+        assert viewer.headers["referrer-policy"] == "no-referrer"
+        assert client.get("/remote/assets/app.js", headers=headers).text == "window.remoteViewer = true"
+        assert client.get("/remote/assets/app.css", headers=headers).text == ".remote { color: blue }"
+        assert client.get("/remote/assets/favicon.svg", headers=headers).text == "<svg></svg>"
+        assert client.get("/remote/assets/%2e%2e/secret.txt", headers=headers).status_code == 404
+
+
 def test_remote_api_has_separate_auth_and_redacted_read_only_payload(tmp_path, monkeypatch):
     from app import main as main_module
     from app import remote_pairing
