@@ -2,31 +2,48 @@
 <html lang="vi">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AgentForge · License Admin</title>
+  <title>AgentForge · Account Admin</title>
   <link rel="stylesheet" href="/admin/admin.css">
   <script src="/admin/admin.js" defer></script>
 </head>
 <body>
-<header><div><span class="eyebrow">AGENTFORGE</span><h1>License Admin</h1><p>Quản lý người dùng, license và thiết bị.</p></div><button id="logout" hidden>Đăng xuất</button></header>
+<header><div><span class="eyebrow">AGENTFORGE</span><h1>Account Admin</h1><p>Quản lý tài khoản Google, kết nối AI/GitHub, license và thiết bị.</p></div><button id="logout" hidden>Đăng xuất</button></header>
 <main>
   <section id="loginPanel" class="card login">
     <h2>Đăng nhập quản trị</h2><p>Nhập admin token của máy chủ. Token chỉ giữ trong bộ nhớ của trang và bị xóa khi tải lại hoặc đăng xuất.</p>
     <form id="loginForm"><label>Admin token<input id="adminToken" type="password" required minlength="32" maxlength="4096" autocomplete="off"></label><button type="submit">Kết nối</button></form>
-    <p class="muted">Sử dụng HTTPS hoặc tunnel riêng. Đây là hồ sơ khách hàng phục vụ quản trị license, chưa phải hệ thống đăng nhập người dùng Desktop.</p>
+    <p class="muted">Sử dụng HTTPS hoặc tunnel riêng. Danh tính Google được Hub xác minh; thông tin kết nối AI/GitHub có nguồn và thời điểm kiểm tra riêng.</p>
   </section>
   <p id="message" role="status" aria-live="polite"></p>
   <div id="workspace" hidden>
     <section id="summary" class="stats" aria-label="Tổng quan"></section>
-    <nav aria-label="Quản trị"><button data-tab="users" class="selected">Người dùng</button><button data-tab="licenses">License</button><button data-tab="devices">Thiết bị</button><button id="refresh" class="secondary">Làm mới</button></nav>
+    <nav aria-label="Quản trị"><button data-tab="users" class="selected">Người dùng</button><button data-tab="licenses">License</button><button data-tab="devices">Thiết bị license</button><button data-tab="claims">Duyệt liên kết Google</button><button id="refresh" class="secondary">Làm mới</button></nav>
     <section id="usersPanel" class="card">
-      <h2>Người dùng</h2><p>Hồ sơ email/tên dùng để liên kết license; không tạo mật khẩu đăng nhập Desktop. Khóa tài khoản giữ nguyên lịch sử và có hiệu lực khi thiết bị xác minh online.</p>
+      <h2>Người dùng</h2><p>Hồ sơ Google đã liên kết và hồ sơ do admin tạo. Mở Chi tiết để xem identity, thiết bị, kết nối AI/GitHub và phiên. Khóa tài khoản thu hồi phiên Hub và chặn xác minh online; dữ liệu được giữ.</p>
       <form id="userForm" class="grid-form"><input id="userId" type="hidden"><label>Tên<input id="userName" required maxlength="120" autocomplete="off"></label><label>Email<input id="userEmail" type="email" required maxlength="254" autocomplete="off"></label><label class="checkbox"><input id="userEnabled" type="checkbox" checked>Cho phép sử dụng license</label><div><button type="submit" id="saveUser">Tạo người dùng</button> <button type="button" id="cancelEdit" class="secondary" hidden>Hủy sửa</button></div></form>
-      <div class="table-wrap"><table><thead><tr><th>Tên / ID</th><th>Email</th><th>Trạng thái</th><th>Tạo lúc</th><th>Thao tác</th></tr></thead><tbody id="usersRows"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>Tên / ID</th><th>Email</th><th>Trạng thái / Google</th><th>Tạo lúc</th><th>Thao tác</th></tr></thead><tbody id="usersRows"></tbody></table></div>
       <div class="pager"><button data-page="users:-1" class="secondary">Trước</button><span id="usersPage"></span><button data-page="users:1" class="secondary">Sau</button></div>
+    </section>
+    <section id="accountPanel" class="card" hidden>
+      <div class="account-heading"><div><h2>Chi tiết tài khoản</h2><p id="accountProfile"></p></div><button id="closeAccount" class="secondary">Đóng chi tiết</button></div>
+      <p class="muted">Google: xác minh bởi Hub qua OIDC. AI/GitHub: metadata do Desktop báo cáo, không chứng minh độc lập quyền model/quota. Phiên cũ vẫn hiển thị device hash dù chưa có metadata thiết bị. Audit giữ 90 ngày.</p>
+      <h3>Google identity</h3><div class="table-wrap"><table><thead><tr><th>Provider / Subject</th><th>Email Google</th><th>Tên Google</th><th>Lần xác minh</th></tr></thead><tbody id="identityRows"></tbody></table></div>
+      <h3>Thiết bị và kết nối AI/GitHub</h3><div class="table-wrap"><table><thead><tr><th>Device hash</th><th>Nền tảng / phiên bản</th><th>Kết nối do Desktop báo cáo</th><th>Lần báo cáo</th></tr></thead><tbody id="accountDeviceRows"></tbody></table></div>
+      <div class="account-heading"><h3>Phiên AgentForge</h3><button id="revokeSessions" class="danger">Thu hồi tất cả phiên</button></div>
+      <div class="table-wrap"><table><thead><tr><th>Phiên / Device hash</th><th>Tạo / dùng gần nhất</th><th>Hết hạn refresh</th><th>Trạng thái</th></tr></thead><tbody id="sessionRows"></tbody></table></div>
+      <h3>License của người dùng</h3><div class="table-wrap"><table><thead><tr><th>License ID</th><th>Gói / thiết bị</th><th>Hết hạn</th><th>Trạng thái</th></tr></thead><tbody id="accountLicenseRows"></tbody></table></div>
+      <h3>Lịch sử hoạt động</h3><div class="table-wrap"><table><thead><tr><th>Hành động</th><th>Nguồn thao tác</th><th>Thiết bị</th><th>Thời điểm</th></tr></thead><tbody id="auditRows"></tbody></table></div>
+      <div class="pager"><button id="accountPrevious" class="secondary">Trang trước</button><span id="accountPage"></span><button id="accountNext" class="secondary">Trang sau</button></div>
+    </section>
+    <section id="claimsPanel" class="card" hidden>
+      <h2>Duyệt liên kết Google với hồ sơ cũ</h2><p>Email trùng nhau không tự gộp tài khoản. Kiểm tra chủ sở hữu, chọn đúng User ID rồi duyệt. Người dùng phải đăng nhập Google lại; identity đã gắn không chuyển qua hồ sơ khác bằng thao tác này.</p>
+      <label>User ID được phép nhận liên kết<input id="claimUserId" maxlength="128" autocomplete="off" placeholder="Chọn Chi tiết ở bảng Người dùng để điền User ID"></label>
+      <div class="table-wrap"><table><thead><tr><th>Yêu cầu / Email Google</th><th>Tạo lúc</th><th>Hết hạn</th><th>Thao tác</th></tr></thead><tbody id="claimsRows"></tbody></table></div>
+      <div class="pager"><button data-page="claims:-1" class="secondary">Trước</button><span id="claimsPage"></span><button data-page="claims:1" class="secondary">Sau</button></div>
     </section>
     <section id="licensesPanel" class="card" hidden>
       <h2>License</h2><p>Key mới chỉ trả về một lần. Danh sách không hiển thị raw key hoặc key hash. Thu hồi có hiệu lực vào lần xác minh tiếp theo; quyền offline đã cấp vẫn theo thời hạn và grace.</p>
-      <form id="licenseForm" class="grid-form"><label>Gói<select id="tier"><option value="monthly">Monthly</option><option value="yearly">Yearly</option><option value="lifetime">Lifetime</option></select></label><label>Số thiết bị<input id="maxDevices" type="number" min="1" max="25" value="1" required></label><label>Hết hạn (giờ máy bạn)<input id="expiresAt" type="datetime-local" required></label><label>User ID (tùy chọn)<input id="licenseUserId" maxlength="64" autocomplete="off" placeholder="Dùng nút Tạo license ở bảng người dùng"></label><button type="submit">Tạo license</button></form>
+      <form id="licenseForm" class="grid-form"><label>Gói<select id="tier"><option value="monthly">Monthly</option><option value="yearly">Yearly</option><option value="lifetime">Lifetime</option></select></label><label>Số thiết bị<input id="maxDevices" type="number" min="1" max="25" value="1" required></label><label>Hết hạn (giờ máy bạn)<input id="expiresAt" type="datetime-local" required></label><label>User ID (tùy chọn)<input id="licenseUserId" maxlength="128" autocomplete="off" placeholder="Dùng nút Tạo license ở bảng người dùng"></label><button type="submit">Tạo license</button></form>
       <aside id="newKeyPanel" class="key-panel" hidden><b>Lưu key ngay — không thể xem lại từ server</b><textarea id="newKey" readonly autocomplete="off" aria-label="License key mới"></textarea><button id="copyKey" class="secondary">Sao chép key</button> <button id="hideKey" class="secondary">Ẩn và xóa khỏi trang</button></aside>
       <div class="table-wrap"><table><thead><tr><th>ID / Người dùng</th><th>Gói</th><th>Thiết bị</th><th>Hết hạn</th><th>Trạng thái</th><th>Thao tác</th></tr></thead><tbody id="licensesRows"></tbody></table></div>
       <div class="pager"><button data-page="licenses:-1" class="secondary">Trước</button><span id="licensesPage"></span><button data-page="licenses:1" class="secondary">Sau</button></div>

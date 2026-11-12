@@ -144,6 +144,13 @@ def revoke(session_id: str) -> bool:
     return changed == 1
 
 
+def revoke_owner_access() -> None:
+    with db.transaction() as con:
+        con.execute("UPDATE lead_sessions SET state='revoked',revoked_at=? WHERE state='active'", (_now(),))
+        con.execute("DELETE FROM lead_lease")
+    _pairings.clear()
+
+
 def status() -> dict:
     now = _now()
     with db.connect() as con:

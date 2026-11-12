@@ -4,6 +4,9 @@ import { invoke, isTauri } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { QRCodeSVG } from 'qrcode.react'
 import { ConnectionWizard } from './ConnectionWizard'
+import { AccountPanel } from './AccountPanel'
+import { useI18n } from './i18n'
+import type { LangMode } from './i18n'
 import './App.css'
 import './Fleet.css'
 
@@ -100,6 +103,11 @@ const statusLabel: Record<string, string> = {
 }
 
 function App() {
+  const { mode, lang, setMode, t } = useI18n()
+  const navLabels: Record<Nav, string> = {
+    Overview: t('navOverview'), Tasks: t('navTasks'), Agents: t('navAgents'), Contracts: t('navContracts'),
+    History: t('navHistory'), Storage: t('navStorage'), Fleet: t('navFleet'), Remote: t('navRemote'),
+  }
   const [nav, setNav] = useState<Nav>('Overview')
   const [agents, setAgents] = useState<Agent[]>([])
   const [repos, setRepos] = useState<Repo[]>([])
@@ -398,37 +406,38 @@ function App() {
 
   return <div className="shell">
     <aside className="sidebar">
-      <div className="brand"><div className="brand-mark">D</div><div><strong>DevAgent Orchestrator</strong><small>Multi-agent engineering</small></div></div>
-      <div className="workspace"><span className="pulse"/><div><small>WORKSPACE</small><strong>Registered projects</strong></div><span className="chevron">⌄</span></div>
-      <div className="nav-label">WORKSPACE</div>
-      <nav>{(['Overview', 'Tasks', 'Agents', 'Contracts', 'History', 'Storage', 'Fleet', 'Remote'] as Nav[]).map((item, i) => <button key={item} className={nav === item ? 'nav-item active' : 'nav-item'} onClick={() => setNav(item)}><span className="nav-icon">{['◫', '☷', '◇', '⌘', '◷', '▤', '▥','⇄'][i]}</span>{item}{item === 'Tasks' && tasks.length > 0 && <span className="nav-count">{tasks.length}</span>}</button>)}</nav>
-      <div className="sidebar-bottom"><div className="connection"><span className={health?.ok ? 'status-dot online' : 'status-dot'}/><span>{health?.ok ? 'Local engine connected' : 'Connecting to API…'}</span></div><small>v0.1.0 · localhost only</small></div>
+      <div className="brand"><div className="brand-mark">D</div><div><strong>{t('brandTitle')}</strong><small>{t('brandSubtitle')}</small></div></div>
+      <div className="workspace"><span className="pulse"/><div><small>{t('workspaceLabel')}</small><strong>{t('workspaceTitle')}</strong></div><span className="chevron">⌄</span></div>
+      <div className="nav-label">{t('workspaceLabel')}</div>
+      <nav>{(['Overview', 'Tasks', 'Agents', 'Contracts', 'History', 'Storage', 'Fleet', 'Remote'] as Nav[]).map((item, i) => <button key={item} className={nav === item ? 'nav-item active' : 'nav-item'} onClick={() => setNav(item)}><span className="nav-icon">{['◫', '☷', '◇', '⌘', '◷', '▤', '▥','⇄'][i]}</span>{navLabels[item]}{item === 'Tasks' && tasks.length > 0 && <span className="nav-count">{tasks.length}</span>}</button>)}</nav>
+      <div className="sidebar-bottom"><div className="connection"><span className={health?.ok ? 'status-dot online' : 'status-dot'}/><span>{health?.ok ? t('engineConnected') : t('engineConnecting')}</span></div><small>{t('versionNote')}</small></div>
     </aside>
     <main className="main">
-      <header className="topbar"><div className="breadcrumbs">AI Engineering <span>/</span> <b>{nav}</b></div><div className="top-actions"><span className="local-tag"><span/>LOCAL</span><button className="icon-btn" title="Refresh" onClick={() => void refresh()}>⟳</button><div className="avatar">JT</div></div></header>
+      <header className="topbar"><div className="breadcrumbs">{t('breadcrumbRoot')} <span>/</span> <b>{navLabels[nav]}</b></div><div className="top-actions"><select className="lang-switch" aria-label={t('langLabel')} value={mode} onChange={e => setMode(e.target.value as LangMode)}><option value="auto">{t('langAuto')} ({lang.toUpperCase()})</option><option value="vi">{t('langVi')}</option><option value="en">{t('langEn')}</option></select><span className="local-tag"><span/>{t('localBadge')}</span><button className="icon-btn" title={t('refreshTitle')} onClick={() => void refresh()}>⟳</button><div className="avatar">JT</div></div></header>
       {error && <div className="toast-error"><span>!</span>{error}<button onClick={() => setError('')}>×</button></div>}
       <div className="page">
-        <div className="page-heading"><div><div className="eyebrow">ENGINEERING CONTROL PLANE</div><h1>{nav === 'Overview' ? 'AI engineering workspace' : nav}</h1><p>{nav === 'Overview' ? 'Coordinate independent agents across your registered Git projects.' : pageDescription(nav)}</p></div>
-          {nav !== 'Contracts' && nav !== 'History' && nav !== 'Storage' && repos.length > 0 && <button className="button primary" onClick={() => { const first = repos[0]; setTaskRepositoryId(first?.id || ''); setTaskBaseBranch(first?.default_branch || ''); setTaskAgentId(''); setShowTaskForm(true) }}><span>＋</span> New task</button>}
-          {nav === 'Contracts' && <button className="button primary" onClick={() => setShowContractForm(true)}><span>＋</span> Propose contract</button>}
+        <div className="page-heading"><div><div className="eyebrow">{t('controlPlaneEyebrow')}</div><h1>{nav === 'Overview' ? t('overviewTitle') : navLabels[nav]}</h1><p>{nav === 'Overview' ? t('overviewSubtitle') : pageDescription(nav)}</p></div>
+          {nav !== 'Contracts' && nav !== 'History' && nav !== 'Storage' && repos.length > 0 && <button className="button primary" onClick={() => { const first = repos[0]; setTaskRepositoryId(first?.id || ''); setTaskBaseBranch(first?.default_branch || ''); setTaskAgentId(''); setShowTaskForm(true) }}><span>＋</span> {t('newTaskBtn')}</button>}
+          {nav === 'Contracts' && <button className="button primary" onClick={() => setShowContractForm(true)}><span>＋</span> {t('proposeContractBtn')}</button>}
         </div>
         {nav === 'Overview' && <>
           {health?.ok && (repos.length === 0 || !agents.some(agent => agent.enabled && agent.available)) && <ConnectionWizard api={api}/>}
+          <AccountPanel api={api}/>
           <LicensePanel/>
-          {repos.length === 0 && <section className="setup-wizard panel"><div><div className="eyebrow">FIRST RUN · STEP 1 OF 3</div><h2>Connect a project repository</h2><p>Choose a local Git checkout, review its base branch and validation setup, then add an Agent before scheduling your first task.</p></div><div className="setup-steps"><span className="current">1 · Repository</span><span>2 · Validation</span><span>3 · Agent</span></div><div className="setup-actions"><button className="button primary" onClick={() => setShowRepoForm(true)}>Choose repository</button><button className="button secondary" onClick={async () => { try { await api('/agents/refresh', { method: 'POST' }); await refresh() } catch (e) { setError(String(e)) } }}>Detect Agent CLIs</button></div></section>}
+          {repos.length === 0 && <section className="setup-wizard panel"><div><div className="eyebrow">{t('firstRunEyebrow')}</div><h2>{t('connectRepoTitle')}</h2><p>{t('connectRepoDesc')}</p></div><div className="setup-steps"><span className="current">{t('stepRepo')}</span><span>{t('stepValidation')}</span><span>{t('stepAgent')}</span></div><div className="setup-actions"><button className="button primary" onClick={() => setShowRepoForm(true)}>{t('chooseRepoBtn')}</button><button className="button secondary" onClick={async () => { try { await api('/agents/refresh', { method: 'POST' }); await refresh() } catch (e) { setError(String(e)) } }}>{t('detectAgentsBtn')}</button></div></section>}
           <section className="stat-grid">
-            <StatCard label="Active tasks" value={counts.active} note="Executing in isolated worktrees" icon="◷" tone="blue"/>
-            <StatCard label="Need your review" value={counts.approval} note="Diff and validation ready" icon="◎" tone="amber"/>
-            <StatCard label="IDE handoffs" value={counts.handoff} note="Waiting for a manual agent run" icon="↗" tone="violet"/>
-            <StatCard label="Needs attention" value={counts.failed} note="Blocked or failed tasks" icon="!" tone="red"/>
+            <StatCard label={t('statActiveTitle')} value={counts.active} note={t('statActiveNote')} icon="◷" tone="blue"/>
+            <StatCard label={t('statReviewTitle')} value={counts.approval} note={t('statReviewNote')} icon="◎" tone="amber"/>
+            <StatCard label={t('statHandoffTitle')} value={counts.handoff} note={t('statHandoffNote')} icon="↗" tone="violet"/>
+            <StatCard label={t('statAttentionTitle')} value={counts.failed} note={t('statAttentionNote')} icon="!" tone="red"/>
           </section>
-          <div className="section-head"><div><h2>Recent tasks</h2><p>Live lifecycle across registered repositories</p></div><button className="text-button" onClick={() => setNav('Tasks')}>View all tasks <span>→</span></button></div>
+          <div className="section-head"><div><h2>{t('recentTasksTitle')}</h2><p>{t('recentTasksSubtitle')}</p></div><button className="text-button" onClick={() => setNav('Tasks')}>{t('viewAllTasks')} <span>→</span></button></div>
           <TaskTable tasks={tasks.slice(0, 6)} onSelect={setSelected} selectedId={selected?.id}/>
-          <section className="two-col"><div className="panel"><div className="panel-heading"><div><h2>Agent registry</h2><p>Capability matching · no fixed roles</p></div><button className="text-button" onClick={() => setNav('Agents')}>Manage →</button></div><AgentList agents={agents.filter(a => a.enabled).slice(0, 3)}/></div>
-            <div className="panel"><div className="panel-heading"><div><h2>Registered repositories</h2><p>Isolated worktree roots</p></div><div className="panel-buttons"><span className="count-pill">{repos.length}</span><button className="button secondary" onClick={() => setShowRepoForm(true)}>＋ Add repository</button></div></div>{repos.map(repo => <div className="repo-row" key={repo.id}><div className="repo-icon">⌘</div><div className="repo-info"><b>{repo.name}</b><small>{repo.path}</small></div><span className="branch-pill">{repo.default_branch}</span><span className="branch-pill">{repo.validation_profile.toUpperCase()} CHECK</span></div>)}</div></section>
+          <section className="two-col"><div className="panel"><div className="panel-heading"><div><h2>{t('agentRegistryTitle')}</h2><p>{t('agentRegistrySubtitle')}</p></div><button className="text-button" onClick={() => setNav('Agents')}>{t('manageBtn')}</button></div><AgentList agents={agents.filter(a => a.enabled).slice(0, 3)}/></div>
+            <div className="panel"><div className="panel-heading"><div><h2>{t('registeredReposTitle')}</h2><p>{t('registeredReposSubtitle')}</p></div><div className="panel-buttons"><span className="count-pill">{repos.length}</span><button className="button secondary" onClick={() => setShowRepoForm(true)}>{t('addRepoBtn')}</button></div></div>{repos.map(repo => <div className="repo-row" key={repo.id}><div className="repo-icon">⌘</div><div className="repo-info"><b>{repo.name}</b><small>{repo.path}</small></div><span className="branch-pill">{repo.default_branch}</span><span className="branch-pill">{repo.validation_profile.toUpperCase()} CHECK</span></div>)}</div></section>
         </>}
         {nav === 'Tasks' && <><div className="filter-row"><span className="filter-summary">{tasks.length} tasks total</span><span className="spacer"/><span className="hint">Select a task to inspect logs and validation.</span></div><TaskTable tasks={tasks} onSelect={setSelected} selectedId={selected?.id}/>{selected && <TaskInspector task={selected} tasks={tasks} events={events} onApprove={() => setApproval(selected)} onCompleteLocal={() => void completeLocally(selected)} onCancel={() => void cancel(selected)} onHandoff={() => void handoff(selected)} onRecoverRestart={() => void recoverRestart(selected)}/>}</>}
-      {nav === 'Agents' && <><ConnectionWizard api={api}/><LicensePanel/><div className="panel"><div className="panel-heading"><div><h2>Registered agents</h2><p>Kiểm tra trạng thái xác thực và gỡ Agent khỏi lịch phân công.</p></div><div className="panel-buttons"><button className="button secondary" onClick={async () => { try { await api('/agents/refresh', { method: 'POST' }); await refresh() } catch (e) { setError(String(e)) } }}>Refresh detection</button><button className="button secondary" onClick={() => setShowAgentForm(true)}>＋ Register adapter</button></div></div><AgentList agents={agents} detailed busyAgentId={busyAgentId} onCheckToken={checkAgentToken} onRemove={removeAgent} onRestore={restoreAgent}/></div><ProviderConnections/></>}
+      {nav === 'Agents' && <><ConnectionWizard api={api}/><AccountPanel api={api}/><LicensePanel/><div className="panel"><div className="panel-heading"><div><h2>{t('registeredAgentsTitle')}</h2><p>{t('registeredAgentsDesc')}</p></div><div className="panel-buttons"><button className="button secondary" onClick={async () => { try { await api('/agents/refresh', { method: 'POST' }); await refresh() } catch (e) { setError(String(e)) } }}>{t('refreshDetectionBtn')}</button><button className="button secondary" onClick={() => setShowAgentForm(true)}>{t('registerAdapterBtn')}</button></div></div><AgentList agents={agents} detailed busyAgentId={busyAgentId} onCheckToken={checkAgentToken} onRemove={removeAgent} onRestore={restoreAgent}/></div><ProviderConnections/></>}
         {nav === 'Contracts' && <div className="panel"><div className="panel-heading"><div><h2>Shared interfaces</h2><p>Approve contracts before dependent tasks can execute.</p></div></div>{contracts.length ? contracts.map(c => <div className="contract-row" key={c.id}><div className="contract-icon">⌘</div><div className="contract-content"><div><b>{c.title}</b><span className={`badge ${c.state === 'approved' ? 'success' : 'warning'}`}>{c.state}</span></div><p>{c.body}</p><small>v{c.version} · {c.id}</small></div>{c.state === 'proposed' && <button className="button secondary" onClick={() => void approveContract(c.id)}>Approve contract</button>}</div>) : <Empty title="No interface contracts" text="Propose shared API or data decisions before scheduling dependent work."/>}</div>}
         {nav === 'History' && <History tasks={tasks.filter(t => ['draft_pr', 'completed', 'failed', 'blocked', 'cancelled'].includes(t.status))} onSelect={setSelected}/>}
         {nav === 'Storage' && <StoragePage metrics={storage} error={storageError} busy={storageBusy} onRefresh={() => void refreshStorage()}/>}
@@ -695,16 +704,17 @@ function LicensePanel() {
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Could not release this device') }
     finally { setBusy(false) }
   }
+  const { t } = useI18n()
   const label = license?.status.replaceAll('_', ' ') || 'checking'
   if (license && !license.configured && !license.required) return null
   return <section className="panel license-panel">
-    <div className="panel-heading"><div><h2>License & trial</h2><p>AI execution is controlled by a signed, device-bound entitlement. Local projects remain readable and exportable.</p></div><span className={`agent-state ${license?.ai_execution ? 'available' : 'disabled'}`}>{label.toUpperCase()}</span></div>
-    {license && <div className="license-summary"><span>AI execution <b>{license.ai_execution ? 'enabled' : 'paused'}</b></span>{license.days_remaining !== null && <span>Days remaining <b>{license.days_remaining}</b></span>}{license.tier && <span>Plan <b>{license.tier}</b></span>}</div>}
-    {license?.status === 'trial_pending' && <p className="license-note">The 14-day device trial starts when the license hub issues the first signed entitlement.</p>}
-    {license && !license.configured && license.required && <p className="storage-alert warning">The license hub is required but is not configured. Agent dispatch is paused.</p>}
-    {license?.configured && license.status === 'consent_required' && <div className="license-consent"><p>To start the 14-day trial or activate a license, this app sends a one-way device identifier hash to the license hub. It does not send source code, prompts, project files, email, or OS details. The trial is tied to this device.</p><button className="button primary" disabled={busy} onClick={() => void consent()}>{busy ? 'Starting…' : 'Agree and start device trial'}</button></div>}
-    {license?.configured && license.status !== 'consent_required' && <div className="license-actions"><form className="license-form" onSubmit={activate}><label>License key<input name="license_key" type="password" autoComplete="off" required minLength={1} maxLength={256} placeholder="Enter activation key"/></label><button className="button primary" disabled={busy}>{busy ? 'Working…' : 'Activate license'}</button></form><button className="button secondary" disabled={busy} onClick={() => void refresh()}>{busy ? 'Checking…' : 'Refresh status'}</button></div>}
-    {license?.status === 'active' && <form className="license-deactivate" onSubmit={deactivate}><label>Release this device<input name="license_key" type="password" autoComplete="off" required minLength={1} maxLength={256} placeholder="Re-enter license key"/></label><button className="button danger-outline" disabled={busy}>{busy ? 'Releasing…' : 'Deactivate on this device'}</button></form>}
+    <div className="panel-heading"><div><h2>{t('licenseTitle')}</h2><p>{t('licenseDesc')}</p></div><span className={`agent-state ${license?.ai_execution ? 'available' : 'disabled'}`}>{label.toUpperCase()}</span></div>
+    {license && <div className="license-summary"><span>{t('licenseAiExec')} <b>{license.ai_execution ? t('licenseEnabled') : t('licensePaused')}</b></span>{license.days_remaining !== null && <span>{t('licenseDaysLeft')} <b>{license.days_remaining}</b></span>}{license.tier && <span>{t('licensePlan')} <b>{license.tier}</b></span>}</div>}
+    {license?.status === 'trial_pending' && <p className="license-note">{t('licenseTrialPending')}</p>}
+    {license && !license.configured && license.required && <p className="storage-alert warning">{t('licenseHubRequired')}</p>}
+    {license?.configured && license.status === 'consent_required' && <div className="license-consent"><p>{t('licenseConsentText')}</p><button className="button primary" disabled={busy} onClick={() => void consent()}>{busy ? t('licenseConsentStarting') : t('licenseConsentBtn')}</button></div>}
+    {license?.configured && license.status !== 'consent_required' && <div className="license-actions"><form className="license-form" onSubmit={activate}><label>{t('licenseKeyLabel')}<input name="license_key" type="password" autoComplete="off" required minLength={1} maxLength={256} placeholder={t('licenseKeyPlaceholder')}/></label><button className="button primary" disabled={busy}>{busy ? t('licenseWorking') : t('licenseActivateBtn')}</button></form><button className="button secondary" disabled={busy} onClick={() => void refresh()}>{busy ? t('licenseChecking') : t('licenseRefreshBtn')}</button></div>}
+    {license?.status === 'active' && <form className="license-deactivate" onSubmit={deactivate}><label>{t('licenseReleaseLabel')}<input name="license_key" type="password" autoComplete="off" required minLength={1} maxLength={256} placeholder={t('licenseReleasePlaceholder')}/></label><button className="button danger-outline" disabled={busy}>{busy ? t('licenseReleasing') : t('licenseDeactivateBtn')}</button></form>}
     {message && <p className="muted" role="status">{message}</p>}
   </section>
 }

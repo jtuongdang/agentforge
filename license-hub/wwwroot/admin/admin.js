@@ -2,8 +2,11 @@
 const $ = id => document.getElementById(id);
 let token = '';
 let epoch = 0;
-const offsets = { users: 0, licenses: 0, devices: 0 };
-const records = { users: [], licenses: [], devices: [] };
+const offsets = { users: 0, licenses: 0, devices: 0, claims: 0 };
+const records = { users: [], licenses: [], devices: [], claims: [] };
+let accountUser = '';
+let accountOffset = 0;
+let accountVersion = 0;
 const limit = 50;
 
 function message(text, error = false) {
@@ -11,7 +14,7 @@ function message(text, error = false) {
   $('message').className = error ? 'error' : 'success';
 }
 function logout() {
-  epoch += 1; token = '';
+  epoch += 1; token = ''; clearAccount(); $('claimUserId').value = '';
   $('adminToken').value = ''; $('newKey').value = ''; $('newKeyPanel').hidden = true;
   $('workspace').hidden = true; $('logout').hidden = true; $('loginPanel').hidden = false;
   $('userForm').reset(); $('userId').value = ''; resetLicense();
@@ -60,6 +63,7 @@ const date = value => value ? new Date(value).toLocaleString() : 'Không giới 
 function tab(kind) {
   for (const name of Object.keys(records)) $(name + 'Panel').hidden = name !== kind;
   for (const node of document.querySelectorAll('[data-tab]')) node.classList.toggle('selected', node.dataset.tab === kind);
+  if (kind !== 'users') clearAccount();
 }
 function editUser(user) {
   $('userId').value = user.id; $('userName').value = user.display_name; $('userEmail').value = user.email;
@@ -75,7 +79,9 @@ function render(kind) {
     const row = document.createElement('tr');
     if (kind === 'users') {
       cell(row, item.display_name, item.id); cell(row, item.email); badge(row, item.is_enabled ? 'active' : 'disabled');
+      const identity = document.createElement('small'); identity.textContent = item.google_linked ? 'Google: ' + item.google_email : 'Chưa liên kết Google'; row.lastChild.append(identity);
       cell(row, date(item.created_at)); const actions = cell(row, '');
+      button(actions, 'Chi tiết', () => showAccount(item.id));
       button(actions, 'Sửa', () => editUser(item));
       if (item.is_enabled) button(actions, 'Tạo license', () => { $('licenseUserId').value = item.id; tab('licenses'); });
       button(actions, item.is_enabled ? 'Khóa' : 'Mở khóa', async () => {
@@ -92,6 +98,16 @@ function render(kind) {
         if (!window.confirm(`Thu hồi license ${item.id}? Key này không thể kích hoạt tiếp. Thiết bị offline vẫn theo entitlement đã cấp.`)) return;
         await api('licenses/' + encodeURIComponent(item.id) + '/revoke', 'POST'); await refresh(); message('Đã thu hồi license.');
       }, true);
+    } else if (kind === 'claims') {
+      cell(row, item.verified_email, item.id); cell(row, date(item.requested_at)); cell(row, date(item.expires_at));
+      const actions = cell(row, '');
+      button(actions, 'Duyệt liên kết', async () => {
+        const userId = $('claimUserId').value.trim();
+        if (!userId) throw new Error('Chọn User ID trước khi duyệt liên kết.');
+        if (!window.confirm(`Liên kết Google ${item.verified_email} với User ID ${userId}? Kiểm tra đúng chủ sở hữu; không tự gộp theo email.`)) return;
+        await api('identity-claims/' + encodeURIComponent(item.id) + '/approve', 'POST', { user_id: userId });
+        await refresh(); message('Đã duyệt. Người dùng cần đăng nhập Google lại.');
+      });
     } else {
       cell(row, item.device_hash, item.id); cell(row, item.license_id); badge(row, item.last_known_status);
       cell(row, date(item.trial_expires_at)); cell(row, date(item.last_seen_at));
@@ -104,16 +120,79 @@ function render(kind) {
   document.querySelector(`[data-page="${kind}:1"]`).disabled = records[kind].length < limit || offsets[kind] + limit > 100000;
 }
 async function load(kind) {
-  const data = await api(`${kind}?offset=${offsets[kind]}&limit=${limit}`); records[kind] = data.items; render(kind);
+  const endpoint = kind === 'claims' ? 'identity-claims' : kind;
+  const data = await api(`${endpoint}?offset=${offsets[kind]}&limit=${limit}`); records[kind] = data.items; render(kind);
 }
+function clearAccount() {
+  accountVersion += 1; accountUser = ''; accountOffset = 0;
+  $('accountPanel').hidden = true; $('accountProfile').textContent = ''; $('accountPage').textContent = '';
+  for (const id of ['identityRows', 'accountDeviceRows', 'sessionRows', 'accountLicenseRows', 'auditRows']) $(id).replaceChildren();
+}
+function detailRows(id, items, paint) {
+  const body = $(id); body.replaceChildren();
+  for (const item of items) { const row = document.createElement('tr'); paint(row, item); body.append(row); }
+  if (!items.length) { const row = document.createElement('tr'); cell(row, 'Chưa có bản ghi ở trang này.'); body.append(row); }
+}
+const when = value => value ? date(value) : 'Chưa ghi nhận';
+const auditLabels = { google_sign_in: 'Đăng nhập Google', session_refreshed: 'Làm mới phiên', signed_out: 'Đăng xuất',
+  sessions_revoked: 'Admin thu hồi phiên', connections_reported: 'Desktop cập nhật kết nối',
+  identity_claim_approved: 'Admin duyệt liên kết Google', profile_created: 'Tạo hồ sơ',
+  profile_updated: 'Cập nhật hồ sơ', account_disabled: 'Khóa tài khoản' };
+async function showAccount(userId, offset = 0) {
+  const version = ++accountVersion;
+  accountUser = userId; accountOffset = offset;
+  const data = await api(`users/${encodeURIComponent(userId)}/accounts?offset=${offset}&limit=${limit}`);
+  if (version !== accountVersion) return;
+  $('accountProfile').textContent = `${data.user.display_name} · ${data.user.email} · User ID: ${data.user.id}`;
+  $('claimUserId').value = data.user.id;
+  detailRows('identityRows', data.identities, (row, item) => {
+    cell(row, item.provider, item.subject); cell(row, item.verified_email, 'Đã xác minh OIDC');
+    cell(row, item.display_name || 'Chưa ghi nhận'); cell(row, when(item.last_verified_at));
+  });
+  detailRows('accountDeviceRows', data.devices, (row, item) => {
+    cell(row, item.device_hash); cell(row, item.platform, item.app_version);
+    const connections = cell(row, item.connections.length ? '' : 'Chưa nhận báo cáo kết nối');
+    for (const connection of item.connections) {
+      const text = document.createElement('small');
+      text.textContent = `${connection.provider} · ${connection.status} · ${connection.account_label || 'chưa có tên tài khoản'} · kiểm tra ${when(connection.checked_at)} · Desktop báo cáo`;
+      connections.append(text);
+    }
+    cell(row, when(item.connections_reported_at), 'Thiết bị kết nối: ' + when(item.last_seen_at));
+  });
+  detailRows('sessionRows', data.sessions, (row, item) => {
+    cell(row, item.id, item.device_hash); cell(row, when(item.created_at), 'Dùng gần nhất: ' + when(item.last_used_at));
+    cell(row, date(item.expires_at)); badge(row, item.status);
+  });
+  detailRows('accountLicenseRows', data.licenses, (row, item) => {
+    cell(row, item.id); cell(row, item.tier, `${item.activated_devices}/${item.max_devices} thiết bị`);
+    cell(row, date(item.expires_at)); badge(row, item.status);
+  });
+  detailRows('auditRows', data.audit, (row, item) => {
+    cell(row, auditLabels[item.kind] || 'Hoạt động tài khoản'); cell(row, item.actor === 'admin' ? 'Quản trị' : 'Người dùng');
+    cell(row, item.device_hash); cell(row, when(item.created_at));
+  });
+  $('accountPage').textContent = `Trang ${offset / limit + 1} · tối đa ${limit} bản ghi mỗi bảng`;
+  $('accountPrevious').disabled = offset === 0;
+  $('accountNext').disabled = !data.has_more || offset + limit > 100000;
+  $('accountPanel').hidden = false;
+}
+$('closeAccount').addEventListener('click', clearAccount);
+$('accountPrevious').addEventListener('click', () => run(() => showAccount(accountUser, Math.max(0, accountOffset - limit))));
+$('accountNext').addEventListener('click', () => run(() => showAccount(accountUser, accountOffset + limit)));
+$('revokeSessions').addEventListener('click', () => run(async () => {
+  if (!accountUser || !window.confirm('Thu hồi mọi phiên AgentForge của tài khoản này? Người dùng sẽ cần đăng nhập lại. Phiên CLI/provider do nhà cung cấp quản lý riêng.')) return;
+  await api('users/' + encodeURIComponent(accountUser) + '/revoke-sessions', 'POST');
+  await refresh(); message('Đã thu hồi các phiên AgentForge.');
+}));
 async function refresh() {
   const data = await api('summary'); $('summary').replaceChildren();
-  for (const [label, key] of [['Người dùng', 'users'], ['Tài khoản được phép', 'enabled_users'], ['License', 'licenses'], ['Thiết bị', 'devices']]) {
+  for (const [label, key] of [['Người dùng', 'users'], ['Tài khoản được phép', 'enabled_users'], ['License', 'licenses'], ['Thiết bị license', 'devices'], ['Google identity', 'google_identities'], ['Thiết bị đăng nhập', 'account_devices'], ['Phiên còn hiệu lực', 'active_sessions']]) {
     const card = document.createElement('div'); card.className = 'stat';
     const title = document.createElement('span'); title.textContent = label;
     const count = document.createElement('b'); count.textContent = data[key]; card.append(title, count); $('summary').append(card);
   }
   await Promise.all(Object.keys(records).map(load));
+  if (accountUser) await showAccount(accountUser, accountOffset);
 }
 $('loginForm').addEventListener('submit', event => {
   event.preventDefault();

@@ -109,6 +109,36 @@ public sealed class GoogleOidcTests
             Assert.Equal(HttpStatusCode.Unauthorized, replay.StatusCode);
             client.DefaultRequestHeaders.Authorization = new("Bearer", tokens.GetProperty("access_token").GetString());
             Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/auth/me")).StatusCode);
+            var report = new DesktopConnectionReport("macos", "0.1.0-test", [
+                new("codex-local", "codex", "valid"), new("github", "github", "valid", "fixture-account", DateTime.UtcNow)
+            ]);
+            var reportResponse = await client.PostAsJsonAsync("/auth/connections", report);
+            Assert.Equal(HttpStatusCode.OK, reportResponse.StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/v1/admin/summary")).StatusCode);
+            using var admin = factory.CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("https://hub.example.invalid") });
+            admin.DefaultRequestHeaders.Authorization = new("Bearer", new string('a', 40));
+            var userId = tokens.GetProperty("user_id").GetString();
+            Assert.Equal(HttpStatusCode.Unauthorized, (await admin.PostAsJsonAsync("/auth/connections", report)).StatusCode);
+            var details = await admin.GetAsync("/api/v1/admin/users/" + userId + "/accounts");
+            Assert.Equal(HttpStatusCode.OK, details.StatusCode);
+            var text = await details.Content.ReadAsStringAsync();
+            Assert.DoesNotContain("AccessHash", text); Assert.DoesNotContain("RefreshHash", text);
+            Assert.DoesNotContain("access_token", text); Assert.DoesNotContain("refresh_token", text);
+            var account = JsonDocument.Parse(text).RootElement;
+            Assert.Equal("oidc_verified", account.GetProperty("identities")[0].GetProperty("source").GetString());
+            Assert.Equal("desktop_reported", account.GetProperty("devices")[0].GetProperty("connections")[0].GetProperty("source").GetString());
+            Assert.Equal("fixture-account", account.GetProperty("devices")[0].GetProperty("connections")[1].GetProperty("account_label").GetString());
+            Assert.Single(account.GetProperty("sessions").EnumerateArray());
+            Assert.True(account.GetProperty("audit").GetArrayLength() >= 2);
+            Assert.Equal(HttpStatusCode.BadRequest, (await admin.GetAsync("/api/v1/admin/users/" + userId + "/accounts?limit=101")).StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, (await admin.GetAsync("/api/v1/admin/users/missing/accounts")).StatusCode);
+            var badReport = await client.PostAsJsonAsync("/auth/connections", new {
+                platform = "macos", app_version = "0.1", connections = new[] { new { connection_id = "github", provider = "github", status = "valid", access_token = "synthetic-must-reject" } }
+            });
+            Assert.Equal(HttpStatusCode.BadRequest, badReport.StatusCode);
+            var summary = await admin.GetFromJsonAsync<JsonElement>("/api/v1/admin/summary");
+            Assert.Equal(1, summary.GetProperty("google_identities").GetInt32());
+            Assert.Equal(1, summary.GetProperty("account_devices").GetInt32());
             Assert.Equal(HttpStatusCode.OK, (await client.PostAsync("/auth/logout", null)).StatusCode);
             Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/auth/me")).StatusCode);
         }

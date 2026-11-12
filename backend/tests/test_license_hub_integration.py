@@ -101,6 +101,7 @@ def live_hub(tmp_path):
             "LICENSE_ADMIN_TOKEN": "local-integration-admin-token-not-for-production-0001",
             "ASPNETCORE_URLS": f"http://127.0.0.1:{hub_port}",
             "ASPNETCORE_ENVIRONMENT": "Production",
+            "GOOGLE_AUTH_ENABLED": "false",
             "DOTNET_NOLOGO": "1",
             "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
         })
@@ -187,7 +188,7 @@ def test_admin_console_user_management_auth_and_account_license_enforcement(live
     base_url, public_pem = live_hub
     admin = {"Authorization": "Bearer local-integration-admin-token-not-for-production-0001"}
     page = httpx.get(base_url + "/admin/", trust_env=False)
-    assert page.status_code == 200 and "License Admin" in page.text
+    assert page.status_code == 200 and "Account Admin" in page.text
     assert httpx.get(base_url + "/ready", trust_env=False).status_code == 200
     assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
     assert page.headers["cache-control"] == "no-store"
@@ -235,4 +236,5 @@ def test_admin_console_user_management_auth_and_account_license_enforcement(live
         assert key not in response.text
         assert "license_key_hash" not in response.text and "token_hash" not in response.text
     summary = httpx.get(base_url + "/api/v1/admin/summary", headers=admin, trust_env=False).json()
-    assert summary == {"users": 1, "enabled_users": 1, "licenses": 1, "devices": 1}
+    assert summary == {"users": 1, "enabled_users": 1, "licenses": 1, "devices": 1,
+                       "google_identities": 0, "account_devices": 0, "active_sessions": 0}

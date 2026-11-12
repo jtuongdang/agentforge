@@ -94,6 +94,15 @@ public sealed class DesktopAuthStoreTests
             var claimedLogin = await Login(legacyAccount);
             var claimedTokens = JsonSerializer.SerializeToElement(await store.Exchange(new(claimedLogin.Code, verifier, device), ct));
             Assert.Equal(legacy.Id, claimedTokens.GetProperty("user_id").GetString());
+            var legacyAccess = claimedTokens.GetProperty("access_token").GetString()!;
+            var legacySession = await store.Authorize(legacyAccess, ct);
+            Assert.NotNull(legacySession);
+            await store.Directory.Report(legacySession, new("windows", "0.1.0-test", [new("github", "github", "valid", "legacy-fixture")]), ct);
+            var legacyDevice = await store.Directory.Devices.Find(x => x.UserId == legacy.Id).FirstAsync();
+            Assert.Equal("legacy-fixture", Assert.Single(legacyDevice.Connections).AccountLabel);
+            Assert.Equal(1, await store.Directory.Devices.CountDocumentsAsync(x => x.UserId == userId));
+            await store.Directory.Report(legacySession, new("windows", "0.1.0-test", []), ct);
+            Assert.Empty((await store.Directory.Devices.Find(x => x.UserId == legacy.Id).FirstAsync()).Connections);
             Assert.Equal(0, await database.GetCollection<DeviceDocument>("devices").CountDocumentsAsync(_ => true)); // no trial reset
         }
         finally { await client.DropDatabaseAsync(name); } // Only this uniquely named synthetic database.

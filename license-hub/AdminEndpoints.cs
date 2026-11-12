@@ -5,10 +5,14 @@ namespace LicenseHub;
 
 public static class AdminEndpoints
 {
-    public static void Map(WebApplication app, IMongoCollection<UserDocument> users,
-        IMongoCollection<LicenseDocument> licenses, IMongoCollection<DeviceDocument> devices,
-        Func<HttpRequest, bool> authorized)
+    public static void Map(WebApplication app, IMongoDatabase database, Func<HttpRequest, bool> authorized)
     {
+        var users = database.GetCollection<UserDocument>("users");
+        var licenses = database.GetCollection<LicenseDocument>("licenses");
+        var devices = database.GetCollection<DeviceDocument>("devices");
+        var identities = database.GetCollection<GoogleIdentityDocument>("auth_identities");
+        var sessions = database.GetCollection<AuthSessionDocument>("auth_sessions");
+        var directory = new AccountDirectory(database);
         app.MapGet("/api/v1/admin/summary", async (HttpRequest request, CancellationToken ct) =>
         {
             if (!authorized(request)) return Results.Unauthorized();
@@ -16,7 +20,10 @@ public static class AdminEndpoints
                 users = await users.CountDocumentsAsync(FilterDefinition<UserDocument>.Empty, cancellationToken: ct),
                 enabled_users = await users.CountDocumentsAsync(item => item.IsEnabled, cancellationToken: ct),
                 licenses = await licenses.CountDocumentsAsync(FilterDefinition<LicenseDocument>.Empty, cancellationToken: ct),
-                devices = await devices.CountDocumentsAsync(FilterDefinition<DeviceDocument>.Empty, cancellationToken: ct)
+                devices = await devices.CountDocumentsAsync(FilterDefinition<DeviceDocument>.Empty, cancellationToken: ct),
+                google_identities = await identities.CountDocumentsAsync(FilterDefinition<GoogleIdentityDocument>.Empty, cancellationToken: ct),
+                account_devices = await directory.Devices.CountDocumentsAsync(FilterDefinition<AccountDeviceDocument>.Empty, cancellationToken: ct),
+                active_sessions = await sessions.CountDocumentsAsync(x => !x.Revoked && x.ExpiresAt > DateTime.UtcNow, cancellationToken: ct)
             });
         });
         app.MapGet("/api/v1/admin/users", async (HttpRequest request, CancellationToken ct, int offset = 0, int limit = 50) =>
@@ -25,7 +32,10 @@ public static class AdminEndpoints
             if (!ValidPage(offset, limit)) return Results.BadRequest(new { error = "Invalid page limits." });
             var rows = await users.Find(FilterDefinition<UserDocument>.Empty)
                 .SortByDescending(item => item.CreatedAt).ThenByDescending(item => item.Id).Skip(offset).Limit(limit).ToListAsync(ct);
-            return Results.Ok(new { offset, limit, items = rows.Select(UserView) });
+            var ids = rows.Select(x => x.Id).ToList();
+            var linked = await identities.Find(Builders<GoogleIdentityDocument>.Filter.In(x => x.UserId, ids)).ToListAsync(ct);
+            var lookup = linked.ToLookup(x => x.UserId);
+            return Results.Ok(new { offset, limit, items = rows.Select(x => UserView(x, lookup[x.Id].OrderByDescending(i => i.LastLoginAt).FirstOrDefault())) });
         });
         app.MapPost("/api/v1/admin/users", async (AdminUserRequest body, HttpRequest request, CancellationToken ct) =>
         {
@@ -36,6 +46,7 @@ public static class AdminEndpoints
             try { await users.InsertOneAsync(user, cancellationToken: ct); }
             catch (MongoWriteException ex) when (ex.WriteError?.Code == 11000)
             { return Results.Conflict(new { error = "A user with this email already exists." }); }
+            await directory.Record(user.Id, null, "profile_created", "admin", ct);
             return Results.Created($"/api/v1/admin/users/{user.Id}", UserView(user));
         });
         app.MapPatch("/api/v1/admin/users/{id}", async (string id, AdminUserRequest body, HttpRequest request, CancellationToken ct) =>
@@ -52,6 +63,10 @@ public static class AdminEndpoints
             catch (MongoWriteException ex) when (ex.WriteError?.Code == 11000)
             { return Results.Conflict(new { error = "A user with this email already exists." }); }
             if (result.MatchedCount == 0) return Results.NotFound();
+            if (!body.IsEnabled)
+                await sessions.UpdateManyAsync(x => x.UserId == id && !x.Revoked,
+                    Builders<AuthSessionDocument>.Update.Set(x => x.Revoked, true), cancellationToken: ct);
+            await directory.Record(id, null, body.IsEnabled ? "profile_updated" : "account_disabled", "admin", ct);
             return Results.Ok(new { updated = true });
         });
         app.MapGet("/api/v1/admin/licenses", async (HttpRequest request, CancellationToken ct, int offset = 0, int limit = 50) =>
@@ -81,9 +96,10 @@ public static class AdminEndpoints
         });
     }
 
-    private static object UserView(UserDocument item) => new {
+    private static object UserView(UserDocument item, GoogleIdentityDocument? identity = null) => new {
         id = item.Id, display_name = item.DisplayName, email = item.Email,
-        is_enabled = item.IsEnabled, created_at = item.CreatedAt, updated_at = item.UpdatedAt
+        is_enabled = item.IsEnabled, created_at = item.CreatedAt, updated_at = item.UpdatedAt,
+        google_linked = identity is not null, google_email = identity?.VerifiedEmail, last_google_verified_at = identity?.LastLoginAt
     };
 
     private static bool ValidPage(int offset, int limit) => offset is >= 0 and <= 100_000 && limit is >= 1 and <= 100;

@@ -38,6 +38,9 @@ public static class GoogleAuth
             options.AddPolicy("auth-start", context =>
                 RateLimitPartition.GetFixedWindowLimiter(context.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ =>
                     new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+            options.AddPolicy("auth-report", context =>
+                RateLimitPartition.GetFixedWindowLimiter(context.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ =>
+                    new FixedWindowRateLimiterOptions { PermitLimit = 30, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
         });
         builder.Services.AddAuthentication("broker-temporary")
             .AddCookie("broker-temporary", options => {
@@ -152,29 +155,23 @@ public static class GoogleAuth
         }).RequireRateLimiting("auth-start");
         app.MapGet("/auth/me", async (HttpRequest request, CancellationToken ct) => {
             var session = await store.Authorize(Bearer(request), ct);
-            return session is null ? Results.Unauthorized() : Results.Ok(new { user_id = session.UserId, device_hash = session.DeviceHash });
+            return session is null ? Results.Unauthorized() : Results.Ok(await store.Profile(session, ct));
         });
+        app.MapPost("/auth/connections", async (DesktopConnectionReport body, HttpRequest request, CancellationToken ct) => {
+            var session = await store.Authorize(Bearer(request), ct);
+            if (session is null) return Results.Unauthorized();
+            try { await store.Directory.Report(session, body, ct); }
+            catch (ArgumentException) { return Results.BadRequest(new { error = "Invalid bounded account metadata." }); }
+            return Results.Ok(new { reported = true, source = "desktop_reported" });
+        }).RequireRateLimiting("auth-report");
         app.MapPost("/auth/logout", async (HttpRequest request, CancellationToken ct) => {
             var session = await store.Authorize(Bearer(request), ct);
             if (session is null) return Results.Unauthorized();
             await store.Sessions.UpdateOneAsync(x => x.Id == session.Id, Builders<AuthSessionDocument>.Update.Set(x => x.Revoked, true), cancellationToken: ct);
+            await store.Directory.Record(session.UserId, session.DeviceHash, "signed_out", ct: ct);
             return Results.Ok(new { revoked = true });
         });
-        app.MapGet("/api/v1/admin/identity-claims", async (HttpRequest request, CancellationToken ct) => {
-            if (!admin(request)) return Results.Unauthorized();
-            var claims = await store.Claims.Find(x => x.ExpiresAt > DateTime.UtcNow).SortByDescending(x => x.RequestedAt).Limit(100).ToListAsync(ct);
-            return Results.Ok(new { items = claims.Select(x => new { id = x.Id, verified_email = x.VerifiedEmail, requested_at = x.RequestedAt, expires_at = x.ExpiresAt }) });
-        });
-        app.MapPost("/api/v1/admin/identity-claims/{id}/approve", async (string id, ApproveIdentityClaim body, HttpRequest request, CancellationToken ct) => {
-            if (!admin(request)) return Results.Unauthorized();
-            return await store.ApproveClaim(id, body.UserId, ct) ? Results.Ok(new { approved = true, sign_in_again = true }) : Results.Conflict();
-        });
-        app.MapPost("/api/v1/admin/users/{id}/revoke-sessions", async (string id, HttpRequest request, CancellationToken ct) => {
-            if (!admin(request)) return Results.Unauthorized();
-            await store.Sessions.UpdateManyAsync(x => x.UserId == id && !x.Revoked,
-                Builders<AuthSessionDocument>.Update.Set(x => x.Revoked, true), cancellationToken: ct);
-            return Results.Ok(new { revoked = true });
-        });
+
     }
 
     private static string Bearer(HttpRequest request) => request.Headers.Authorization.ToString() is var value

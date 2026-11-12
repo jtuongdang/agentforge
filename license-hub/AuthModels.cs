@@ -23,6 +23,7 @@ public sealed class GoogleIdentityDocument
     public string Subject { get; set; } = "";
     public string UserId { get; set; } = "";
     public string VerifiedEmail { get; set; } = "";
+    public string DisplayName { get; set; } = "";
     public DateTime LastLoginAt { get; set; }
 }
 
@@ -46,6 +47,8 @@ public sealed class AuthSessionDocument
     public DateTime AccessExpiresAt { get; set; }
     public DateTime ExpiresAt { get; set; }
     public bool Revoked { get; set; }
+    public DateTime? CreatedAt { get; set; }
+    public DateTime? LastUsedAt { get; set; }
 }
 
 public sealed record DesktopLoginStart(

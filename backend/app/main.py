@@ -27,6 +27,7 @@ from . import providers
 from . import tech_lead
 from . import remote_pairing
 from .agent_login import agent_login
+from .account import AccountError, account_service
 from .license import LicenseConsentRequired, LicenseUnavailable, license_service
 from .engine import get_task, log_event, set_task
 from . import fleet as fleet_manager
@@ -160,12 +161,15 @@ async def lifespan(_: FastAPI):
     bootstrap()
     worker = asyncio.create_task(orchestrator.start())
     license_worker = asyncio.create_task(license_service.refresh_loop())
+    account_worker = asyncio.create_task(account_service.refresh_loop())
     yield
     await agent_login.cancel()
+    await account_service.cancel_login()
     await orchestrator.stop()
     worker.cancel()
     license_worker.cancel()
-    await asyncio.gather(worker, license_worker, return_exceptions=True)
+    account_worker.cancel()
+    await asyncio.gather(worker, license_worker, account_worker, return_exceptions=True)
 
 
 app = FastAPI(title="DevAgent Orchestrator", version="0.1.0", lifespan=lifespan)
@@ -207,7 +211,7 @@ async def require_local_api_token(request, call_next):
             from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "Local API token required"}, status_code=401)
     response = await call_next(request)
-    if request.url.path.startswith("/api/connections/"):
+    if request.url.path.startswith(("/api/connections/", "/api/account")):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
     return response
@@ -853,6 +857,78 @@ def agents():
     return registry.list()
 
 
+@app.get("/api/account")
+def desktop_account():
+    return account_service.status()
+
+
+def _account_transition_guard() -> None:
+    with db.connect() as con:
+        active = con.execute("SELECT 1 FROM tasks WHERE status IN ('planning','assigned','running','validating','recovering','publishing') LIMIT 1").fetchone()
+    if active:
+        raise HTTPException(409, "Hoàn tất hoặc hủy task đang chạy trước khi thay đổi tài khoản.")
+
+
+@app.post("/api/account/login")
+async def login_desktop_account(sync_metadata: bool = False):
+    if account_service.transitioning:
+        raise HTTPException(409, "Đang thay đổi tài khoản.")
+    account_service.transitioning = True
+    try:
+        _account_transition_guard()
+        return await account_service.start_login(sync_metadata)
+    except AccountError as exc:
+        raise HTTPException(400, str(exc)) from None
+    finally:
+        account_service.transitioning = False
+
+
+@app.delete("/api/account/login")
+async def cancel_desktop_login():
+    return await account_service.cancel_login()
+
+
+@app.post("/api/account/claim-profile")
+async def claim_account_profile(acknowledge_data_ownership: bool = False):
+    if not acknowledge_data_ownership:
+        raise HTTPException(400, "Xác nhận nhận quyền sở hữu dữ liệu và sao lưu trước.")
+    if account_service.transitioning:
+        raise HTTPException(409, "Đang thay đổi tài khoản.")
+    account_service.transitioning = True
+    try:
+        _account_transition_guard()
+        await account_service.confirm_profile()
+        return account_service.status()
+    except AccountError as exc:
+        raise HTTPException(400, str(exc)) from None
+    finally:
+        account_service.transitioning = False
+
+
+@app.post("/api/account/sync-connections")
+async def sync_account_connections():
+    try:
+        return await account_service.sync_connections(await asyncio.to_thread(registry.list))
+    except (AccountError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@app.post("/api/account/logout")
+async def logout_desktop_account():
+    if account_service.transitioning:
+        raise HTTPException(409, "Đang thay đổi tài khoản.")
+    account_service.transitioning = True
+    try:
+        _account_transition_guard()
+        tech_lead.revoke_owner_access()
+        remote_pairing.revoke_owner_access()
+        return await account_service.logout()
+    except AccountError as exc:
+        raise HTTPException(400, str(exc)) from None
+    finally:
+        account_service.transitioning = False
+
+
 @app.get("/api/connections/login")
 def cli_login_status():
     return agent_login.status()
@@ -944,6 +1020,9 @@ def refresh_agents():
 
 @app.post("/api/agents/{agent_id}/check-token")
 def check_agent_token(agent_id: str):
+    current = registry.get(agent_id)
+    if current and current["adapter"] == "copilot" and not account_service.dispatch_allowed():
+        raise HTTPException(403, "Cần đăng nhập Google và nhận profile trước khi gửi request Copilot.")
     agent = registry.check_token(agent_id)
     if agent is None:
         raise HTTPException(404, "Agent not found")

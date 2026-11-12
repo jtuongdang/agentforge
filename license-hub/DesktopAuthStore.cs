@@ -9,17 +9,23 @@ public sealed class DesktopAuthStore(IMongoDatabase database)
     public IMongoCollection<IdentityClaimDocument> Claims { get; } = database.GetCollection<IdentityClaimDocument>("auth_identity_claims");
     public IMongoCollection<AuthSessionDocument> Sessions { get; } = database.GetCollection<AuthSessionDocument>("auth_sessions");
     private IMongoCollection<UserDocument> Users { get; } = database.GetCollection<UserDocument>("users");
+    public AccountDirectory Directory { get; } = new(database);
 
     public async Task Initialize(CancellationToken ct = default)
     {
+        await Directory.Initialize(ct);
         await Transactions.Indexes.CreateOneAsync(new CreateIndexModel<AuthTransactionDocument>(Builders<AuthTransactionDocument>.IndexKeys.Ascending(x => x.ExpiresAt),
             new CreateIndexOptions { ExpireAfter = TimeSpan.Zero }), cancellationToken: ct);
         await Sessions.Indexes.CreateManyAsync([
             new(Builders<AuthSessionDocument>.IndexKeys.Ascending(x => x.ExpiresAt), new CreateIndexOptions { ExpireAfter = TimeSpan.Zero }),
             new(Builders<AuthSessionDocument>.IndexKeys.Ascending(x => x.AccessHash), new CreateIndexOptions { Unique = true }),
-            new(Builders<AuthSessionDocument>.IndexKeys.Ascending(x => x.RefreshHash), new CreateIndexOptions { Unique = true })
+            new(Builders<AuthSessionDocument>.IndexKeys.Ascending(x => x.RefreshHash), new CreateIndexOptions { Unique = true }),
+            new(Builders<AuthSessionDocument>.IndexKeys.Ascending(x => x.UserId).Descending(x => x.CreatedAt)),
+            new(Builders<AuthSessionDocument>.IndexKeys.Ascending(x => x.PreviousRefreshHashes))
         ], ct);
         await Identities.Indexes.CreateOneAsync(new CreateIndexModel<GoogleIdentityDocument>(Builders<GoogleIdentityDocument>.IndexKeys.Ascending(x => x.Provider).Ascending(x => x.Subject),
+            new CreateIndexOptions { Unique = true }), cancellationToken: ct);
+        await Identities.Indexes.CreateOneAsync(new CreateIndexModel<GoogleIdentityDocument>(Builders<GoogleIdentityDocument>.IndexKeys.Ascending(x => x.Provider).Ascending(x => x.UserId),
             new CreateIndexOptions { Unique = true }), cancellationToken: ct);
         await Claims.Indexes.CreateOneAsync(new CreateIndexModel<IdentityClaimDocument>(Builders<IdentityClaimDocument>.IndexKeys.Ascending(x => x.ExpiresAt),
             new CreateIndexOptions { ExpireAfter = TimeSpan.Zero }), cancellationToken: ct);
@@ -66,7 +72,8 @@ public sealed class DesktopAuthStore(IMongoDatabase database)
         if (identity is not null)
         {
             await Identities.UpdateOneAsync(x => x.Id == identityId, Builders<GoogleIdentityDocument>.Update
-                .Set(x => x.VerifiedEmail, account.Email).Set(x => x.LastLoginAt, DateTime.UtcNow), cancellationToken: ct);
+                .Set(x => x.VerifiedEmail, account.Email).Set(x => x.DisplayName, account.DisplayName)
+                .Set(x => x.LastLoginAt, DateTime.UtcNow), cancellationToken: ct);
             return identity.UserId;
         }
         // Stable, disjoint ID makes retries/concurrent first login safe without requiring a replica set.
@@ -92,7 +99,7 @@ public sealed class DesktopAuthStore(IMongoDatabase database)
         }
         await Identities.UpdateOneAsync(x => x.Id == identityId, Builders<GoogleIdentityDocument>.Update
             .SetOnInsert(x => x.Subject, account.Subject).SetOnInsert(x => x.UserId, userId)
-            .SetOnInsert(x => x.Provider, "google").Set(x => x.VerifiedEmail, account.Email)
+            .SetOnInsert(x => x.Provider, "google").Set(x => x.VerifiedEmail, account.Email).Set(x => x.DisplayName, account.DisplayName)
             .Set(x => x.LastLoginAt, DateTime.UtcNow), new UpdateOptions { IsUpsert = true }, ct);
         // A concurrent administrator approval may have established a different owner; never overwrite it.
         return (await Identities.Find(x => x.Id == identityId).FirstAsync(ct)).UserId;
@@ -112,8 +119,11 @@ public sealed class DesktopAuthStore(IMongoDatabase database)
         var access = DesktopAuthProtocol.Token(); var refresh = DesktopAuthProtocol.Token();
         var session = new AuthSessionDocument { UserId = transaction.UserId, DeviceHash = transaction.DeviceHash,
             AccessHash = DesktopAuthProtocol.Hash(access), RefreshHash = DesktopAuthProtocol.Hash(refresh),
-            AccessExpiresAt = DateTime.UtcNow.AddMinutes(15), ExpiresAt = DateTime.UtcNow.AddDays(30) };
+            AccessExpiresAt = DateTime.UtcNow.AddMinutes(15), ExpiresAt = DateTime.UtcNow.AddDays(30),
+            CreatedAt = DateTime.UtcNow, LastUsedAt = DateTime.UtcNow };
         await Sessions.InsertOneAsync(session, cancellationToken: ct);
+        await Directory.RegisterDevice(session.UserId, session.DeviceHash, ct);
+        await Directory.Record(session.UserId, session.DeviceHash, "google_sign_in", ct: ct);
         return Tokens(session, access, refresh);
     }
 
@@ -135,9 +145,13 @@ public sealed class DesktopAuthStore(IMongoDatabase database)
         var updated = await Sessions.FindOneAndUpdateAsync(x => x.Id == session.Id && x.RefreshHash == hash && !x.Revoked,
             Builders<AuthSessionDocument>.Update.Set(x => x.AccessHash, DesktopAuthProtocol.Hash(access))
                 .Set(x => x.RefreshHash, DesktopAuthProtocol.Hash(refresh)).Set(x => x.AccessExpiresAt, DateTime.UtcNow.AddMinutes(15))
+                .Set(x => x.LastUsedAt, DateTime.UtcNow)
                 .PushEach(x => x.PreviousRefreshHashes, [hash], slice: -100),
             new FindOneAndUpdateOptions<AuthSessionDocument> { ReturnDocument = ReturnDocument.After }, ct);
-        return updated is null ? null : Tokens(updated, access, refresh);
+        if (updated is null) return null;
+        await Directory.RegisterDevice(updated.UserId, updated.DeviceHash, ct);
+        await Directory.Record(updated.UserId, updated.DeviceHash, "session_refreshed", ct: ct);
+        return Tokens(updated, access, refresh);
     }
 
     public async Task<AuthSessionDocument?> Authorize(string token, CancellationToken ct)
@@ -147,6 +161,15 @@ public sealed class DesktopAuthStore(IMongoDatabase database)
         var session = await Sessions.Find(x => x.AccessHash == hash && !x.Revoked && x.ExpiresAt > DateTime.UtcNow
             && x.AccessExpiresAt > DateTime.UtcNow).FirstOrDefaultAsync(ct);
         return session is not null && await Enabled(session.UserId, ct) ? session : null;
+    }
+
+    public async Task<object> Profile(AuthSessionDocument session, CancellationToken ct)
+    {
+        var user = await Users.Find(x => x.Id == session.UserId).FirstAsync(ct);
+        var identity = await Identities.Find(x => x.UserId == session.UserId && x.Provider == "google").FirstOrDefaultAsync(ct);
+        return new { user_id = user.Id, device_hash = session.DeviceHash, display_name = user.DisplayName,
+            email = user.Email, google_email = identity?.VerifiedEmail, google_verified = identity is not null,
+            last_google_verified_at = identity?.LastLoginAt };
     }
 
     public async Task<bool> ApproveClaim(string id, string userId, CancellationToken ct)
@@ -159,6 +182,7 @@ public sealed class DesktopAuthStore(IMongoDatabase database)
             UserId = userId, VerifiedEmail = claim.VerifiedEmail, LastLoginAt = claim.RequestedAt }, cancellationToken: ct); }
         catch (MongoWriteException ex) when (ex.WriteError?.Code == 11000) { return false; }
         await Claims.DeleteOneAsync(x => x.Id == id, ct);
+        await Directory.Record(userId, null, "identity_claim_approved", "admin", ct);
         return true;
     }
 

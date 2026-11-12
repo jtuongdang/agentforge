@@ -344,6 +344,19 @@ def consume_rest_budget(device_id: str, limit: int = 120, period_seconds: int = 
         return True
 
 
+def revoke_owner_access() -> None:
+    now = _iso(_now())
+    with db.transaction() as con:
+        con.execute("UPDATE remote_devices SET state='revoked',revoked_at=? WHERE state='active'", (now,))
+        con.execute("UPDATE remote_task_diff_grants SET revoked_at=? WHERE revoked_at IS NULL", (now,))
+        con.execute("UPDATE remote_invites SET state='revoked' WHERE state IN ('issued','requested')")
+        con.execute("UPDATE remote_pairing_requests SET state='denied' WHERE state IN ('pending','approved','delivered')")
+    with _delivery_lock:
+        _deliveries.clear()
+    with _ws_lock:
+        _ws_tickets.clear()
+
+
 def list_devices() -> list[dict]:
     with db.connect() as con:
         rows = con.execute("""SELECT id,client_id,client_name,state,created_at,last_seen,expires_at

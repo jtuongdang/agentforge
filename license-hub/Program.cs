@@ -239,7 +239,8 @@ app.MapPost("/api/v1/admin/licenses/{id}/revoke", async (string id, HttpRequest 
     return Results.Ok(new { revoked = true });
 });
 
-AdminEndpoints.Map(app, users, licenses, devices, request => AdminAuthorized(request, adminToken));
+AdminEndpoints.Map(app, database, request => AdminAuthorized(request, adminToken));
+await AccountAdminEndpoints.Map(app, database, request => AdminAuthorized(request, adminToken));
 await GoogleAuth.Map(app, googleAuth, request => AdminAuthorized(request, adminToken));
 app.Run();
 
