@@ -2566,6 +2566,11 @@ def test_remote_ingress_requires_exact_https_origin_and_trusted_proxy(monkeypatc
 
     valid = {"host":"review.example.invalid", "origin":"https://review.example.invalid", "x-forwarded-proto":"https"}
     assert remote_pairing.ingress_request_allowed(request(valid)) is True
+    assert remote_pairing.trusted_ingress_peer_allowed(request({"host":"review.example.invalid",
+        "x-forwarded-proto":"https"})) is True
+    assert remote_pairing.ingress_request_allowed(request({"host":"review.example.invalid",
+        "x-forwarded-proto":"https"})) is False
+    assert remote_pairing.trusted_ingress_peer_allowed(request(valid | {"host":"attacker.example.invalid"})) is False
     assert remote_pairing.ingress_request_allowed(request(valid | {"host":"attacker.example.invalid"})) is False
     assert remote_pairing.ingress_request_allowed(request(valid | {"origin":"https://attacker.example.invalid"})) is False
     assert remote_pairing.ingress_request_allowed(request(valid | {"x-forwarded-proto":"http"})) is False

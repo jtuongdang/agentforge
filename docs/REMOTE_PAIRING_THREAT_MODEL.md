@@ -8,7 +8,7 @@ Status: Phase 8 implementation baseline selected by the project owner. The appli
 - Client: browser at the configured HTTPS origin.
 - Permissions: read-only task summary by default; no task creation, review decision, local owner API, logs, prompts, arbitrary source, provider settings, cleanup, or publication.
 - Full diff: separate owner grant for one device + one task + the exact validated Git SHA. The grant stops matching when that task revision changes and can be revoked separately.
-- The desktop backend keeps its normal ephemeral loopback API port. When enabled, it additionally binds a gateway to `127.0.0.1:8766` (configurable) for the local HTTPS ingress. The gateway is not bound to a LAN/VPN interface. The ingress must expose only `/remote`, `/remote/api/*`, and `/remote/ws/*` and must only accept VPN clients.
+- The desktop backend keeps its normal ephemeral loopback API port. When enabled, it additionally binds a gateway to `127.0.0.1:8766` (configurable) for the local HTTPS ingress. The gateway is not bound to a LAN/VPN interface. The ingress must expose only `/remote`, `/remote/assets/*`, `/remote/api/*`, and `/remote/ws/*` and must only accept VPN clients. Packaged sidecar includes the browser bundle and serves it at `/remote`; asset URLs remain under `/remote/assets/*` so the ingress can use this narrow route allowlist.
 - Required environment: `CLINIC_ORCHESTRATOR_REMOTE_ORIGIN=https://<exact-host>`, `CLINIC_ORCHESTRATOR_REMOTE_PROXY_IPS=127.0.0.1` (or the actual local proxy peer), and optional `CLINIC_ORCHESTRATOR_REMOTE_GATEWAY_PORT=8766`. Missing or invalid values leave the gateway disabled. The ingress must overwrite `Host` and `X-Forwarded-Proto`, set `X-Forwarded-Proto: https`, pass the exact public `Host`, upgrade WebSocket, and avoid logging pairing/session cookies or headers.
 - A desktop process restart expires browser sessions and pending pairings; the user must pair again. No remote credential is included in checkpoint archives.
 
@@ -52,7 +52,7 @@ Use a private VPN path with HTTPS ingress on the same desktop host, reverse-prox
 
 ## Implementation gates
 
-1. Keep the existing ephemeral loopback owner API and local token behavior unchanged; the optional second gateway also binds to loopback only.
+1. Keep the existing ephemeral loopback owner API and local token behavior unchanged; the optional second gateway also binds to loopback only. Serve the browser viewer and its static assets from that sidecar without exposing the owner dashboard or API.
 2. Implement one-time invitation, pending browser request, local owner approval, hash-only device credential, and read-only REST/status WebSocket.
 3. Add expiry, per-device revoke, exact host/origin/proxy checks, payload/rate/connection limits, and audit events.
 4. Allow full diff only after local owner confirmation pins the task's current validated SHA; do not offer remote action grants in this milestone.

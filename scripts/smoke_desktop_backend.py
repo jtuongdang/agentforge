@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import signal
 import sqlite3
 import subprocess
@@ -14,6 +15,8 @@ import threading
 import time
 from contextlib import closing, contextmanager
 from pathlib import Path
+from socket import AF_INET, SOCK_STREAM, socket
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -124,6 +127,12 @@ def main() -> int:
         verify_packaged_crash_guard(binary, temp)
         env = os.environ.copy()
         env["CLINIC_ORCHESTRATOR_DATA_DIR"] = str(temp / "data")
+        env["CLINIC_ORCHESTRATOR_REMOTE_ORIGIN"] = "https://remote.example.invalid"
+        env["CLINIC_ORCHESTRATOR_REMOTE_PROXY_IPS"] = "127.0.0.1"
+        with socket(AF_INET, SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            remote_port = probe.getsockname()[1]
+        env["CLINIC_ORCHESTRATOR_REMOTE_GATEWAY_PORT"] = str(remote_port)
         process = subprocess.Popen(
             [str(binary)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1,
@@ -144,6 +153,7 @@ def main() -> int:
         try:
             deadline = time.monotonic() + 45
             port = None
+            gateway_port = None
             while time.monotonic() < deadline:
                 try:
                     line = messages.get(timeout=0.25)
@@ -155,8 +165,11 @@ def main() -> int:
                     break
                 if line.startswith("READY:"):
                     port = int(line.partition(":")[2])
+                elif line.startswith("REMOTE_READY:"):
+                    gateway_port = int(line.rpartition(":")[2])
+                if port is not None and gateway_port is not None:
                     break
-            if port is None:
+            if port is None or gateway_port is None:
                 raise RuntimeError("Sidecar failed to report readiness: " + " | ".join(tail))
 
             base = f"http://127.0.0.1:{port}"
@@ -172,8 +185,28 @@ def main() -> int:
                 raise RuntimeError("Packaged sidecar has no approved OS credential store: "
                                    + str(credential_store.get("reason", "unavailable")))
             remote_status = read_json(base + "/api/remote/status", {"Authorization": f"Bearer {token}"})
-            if remote_status.get("enabled"):
-                raise RuntimeError("Packaged sidecar unexpectedly enabled the remote gateway without ingress configuration")
+            if not remote_status.get("enabled") or remote_status.get("gateway") != f"127.0.0.1:{gateway_port}":
+                raise RuntimeError("Packaged sidecar did not enable the configured loopback remote gateway")
+
+            ingress_headers = {"Host": "remote.example.invalid", "X-Forwarded-Proto": "https"}
+            with urlopen(Request(f"http://127.0.0.1:{gateway_port}/remote", headers=ingress_headers), timeout=5) as response:
+                remote_html = response.read().decode("utf-8")
+                if response.status != 200 or "DevAgent Remote Review" not in remote_html:
+                    raise RuntimeError("Packaged remote browser viewer did not load from the gateway")
+            asset = re.search(r'(?:src|href)="/remote/assets/([^\"]+)"', remote_html)
+            if asset is None:
+                raise RuntimeError("Remote viewer HTML does not reference gateway-scoped assets")
+            with urlopen(Request(f"http://127.0.0.1:{gateway_port}/remote/assets/{asset.group(1)}",
+                                 headers=ingress_headers), timeout=5) as response:
+                if response.status != 200 or not response.read(64):
+                    raise RuntimeError("Packaged remote viewer asset did not load")
+            try:
+                urlopen(Request(f"http://127.0.0.1:{gateway_port}/api/fleet",
+                                headers=ingress_headers | {"Authorization": f"Bearer {token}"}), timeout=5)
+                raise RuntimeError("Owner API was reachable through the remote gateway")
+            except HTTPError as exc:
+                if exc.code != 403:
+                    raise RuntimeError(f"Remote gateway owner API returned unexpected HTTP {exc.code}") from exc
 
             database = temp / "data" / "orchestrator.sqlite3"
             if not database.is_file():
@@ -210,7 +243,7 @@ def main() -> int:
                 restored_integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
             if restored_integrity != "ok" or restored["repository_count"] != 0:
                 raise RuntimeError("Packaged restored profile failed database or repository checks")
-            print(f"Packaged sidecar smoke passed: API/token auth, OS credential store, schema={version}, provider metadata, checkpoint export/restore, process crash containment.")
+            print(f"Packaged sidecar smoke passed: owner API isolation, remote viewer/assets, OS credential store, schema={version}, provider metadata, checkpoint export/restore, process crash containment.")
             return 0
         except Exception as exc:
             print(f"Packaged sidecar smoke failed: {exc}", file=sys.stderr)

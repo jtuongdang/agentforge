@@ -61,6 +61,7 @@ run(venvPython, [
   `--output-dir=${outputDir}`,
   `--output-filename=${filename}`,
   `--include-data-file=${join(root, "docs", "PROJECT_CONVENTIONS.md")}=${"docs/PROJECT_CONVENTIONS.md"}`,
+  `--include-data-dir=${join(root, "dashboard", "dist")}=${"dashboard/dist"}`,
   "backend/desktop_entry.py",
 ]);
 

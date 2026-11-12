@@ -82,7 +82,8 @@ def remote_boundary_enabled() -> bool:
         return False
 
 
-def ingress_request_allowed(request: Request) -> bool:
+def trusted_ingress_peer_allowed(request: Request) -> bool:
+    """Verify the configured public host, HTTPS signal, and reverse-proxy peer."""
     if not remote_boundary_enabled():
         return False
     from urllib.parse import urlsplit
@@ -90,13 +91,8 @@ def ingress_request_allowed(request: Request) -> bool:
     parsed = urlsplit(origin)
     expected_host = parsed.netloc.lower()
     request_host = request.headers.get("host", "").strip().lower()
-    request_origin = request.headers.get("origin", "").strip().rstrip("/")
     # The ingress must overwrite these headers. TLS is required at the ingress boundary.
     if request_host != expected_host:
-        return False
-    if request_origin and request_origin != origin:
-        return False
-    if not request_origin and (request.method != "GET" or request.headers.get("sec-fetch-site") != "same-origin"):
         return False
     if request.headers.get("x-forwarded-proto", "").lower() != "https":
         return False
@@ -108,6 +104,18 @@ def ingress_request_allowed(request: Request) -> bool:
     except ValueError:
         return False
     return peer in trusted
+
+
+def ingress_request_allowed(request: Request) -> bool:
+    if not trusted_ingress_peer_allowed(request):
+        return False
+    origin = os.environ["CLINIC_ORCHESTRATOR_REMOTE_ORIGIN"].strip().rstrip("/")
+    request_origin = request.headers.get("origin", "").strip().rstrip("/")
+    if request_origin and request_origin != origin:
+        return False
+    if not request_origin and (request.method != "GET" or request.headers.get("sec-fetch-site") != "same-origin"):
+        return False
+    return True
 
 
 def create_invite() -> dict:
