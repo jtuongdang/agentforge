@@ -38,7 +38,30 @@ public sealed class LicenseDocument
     public bool IsActive { get; set; } = true;
     [BsonElement("activated_device_hashes")]
     public List<string> ActivatedDeviceHashes { get; set; } = [];
+    [BsonElement("user_id")]
+    public string? UserId { get; set; }
 }
+
+public sealed class UserDocument
+{
+    [BsonId]
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    [BsonElement("display_name")]
+    public string DisplayName { get; set; } = "";
+    [BsonElement("email")]
+    public string Email { get; set; } = "";
+    [BsonElement("is_enabled")]
+    public bool IsEnabled { get; set; } = true;
+    [BsonElement("created_at")]
+    public DateTime CreatedAt { get; set; }
+    [BsonElement("updated_at")]
+    public DateTime UpdatedAt { get; set; }
+}
+
+public sealed record AdminUserRequest(
+    [property: System.Text.Json.Serialization.JsonPropertyName("display_name")] string DisplayName,
+    [property: System.Text.Json.Serialization.JsonPropertyName("email")] string Email,
+    [property: System.Text.Json.Serialization.JsonPropertyName("is_enabled")] bool IsEnabled = true);
 
 public sealed record VerifyRequest(
     [property: System.Text.Json.Serialization.JsonPropertyName("device_hash")] string DeviceHash);
@@ -51,7 +74,8 @@ public sealed record DeactivateRequest(
 public sealed record CreateLicenseRequest(
     [property: System.Text.Json.Serialization.JsonPropertyName("tier")] string Tier,
     [property: System.Text.Json.Serialization.JsonPropertyName("max_devices")] int MaxDevices,
-    [property: System.Text.Json.Serialization.JsonPropertyName("expires_at")] DateTime? ExpiresAt);
+    [property: System.Text.Json.Serialization.JsonPropertyName("expires_at")] DateTime? ExpiresAt,
+    [property: System.Text.Json.Serialization.JsonPropertyName("user_id")] string? UserId = null);
 public sealed record EntitlementClaims(
     [property: System.Text.Json.Serialization.JsonPropertyName("version")] int Version,
     [property: System.Text.Json.Serialization.JsonPropertyName("device_hash")] string DeviceHash,

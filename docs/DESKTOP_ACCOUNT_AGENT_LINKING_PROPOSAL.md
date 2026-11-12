@@ -1,6 +1,6 @@
 # Đề xuất liên kết Desktop, AI agent và đăng nhập Google
 
-Ngày: **12/11/2026**. Trạng thái: **chờ owner duyệt; chưa triển khai Google login**.
+Ngày: **12/11/2026**. Trạng thái: **owner đã duyệt toàn bộ phương án; triển khai G1 → G5; Google login chưa được triển khai/vận hành**.
 Đây là kịch bản sản phẩm và các cổng nghiệm thu đề xuất. Phần Docker admin
 license/thiết bị/hồ sơ người dùng đang được hoàn thiện theo yêu cầu riêng.
 
@@ -214,7 +214,7 @@ Không đổi cùng lúc sang account-based trial, auto-merge hay cloud-sync sou
 - Một tài khoản GitHub có quyền dùng Copilot và repo fixture cho nghiệm thu
   có sự đồng ý tiêu request; không cần chia sẻ mật khẩu/token cho agent.
 
-## 9. Gói quyết định đề nghị owner duyệt
+## 9. Gói quyết định đã được owner duyệt ngày 12/11/2026
 
 1. Google xác minh tài khoản AgentForge trước khi kích hoạt AI; giữ local read/export.
 2. Trial vẫn 14 ngày theo thiết bị; đổi/login Google không tạo trial mới.

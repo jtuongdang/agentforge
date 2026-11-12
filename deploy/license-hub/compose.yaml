@@ -1,0 +1,32 @@
+services:
+  license-hub:
+    image: ${LICENSE_HUB_IMAGE:-jtuongdev/agentforge-admin:0.1.0-admin.1}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${LICENSE_HUB_BIND_ADDRESS:-127.0.0.1}:${LICENSE_HUB_PORT:-8080}:8080"
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      ASPNETCORE_ENVIRONMENT: Production
+      Logging__LogLevel__Default: Warning
+      MONGODB_URI: ${MONGODB_URI:?Set MONGODB_URI in .env}
+      LICENSE_DATABASE: ${LICENSE_DATABASE:-LicenseHubDb}
+      LICENSE_KEY_PEPPER: ${LICENSE_KEY_PEPPER:?Set LICENSE_KEY_PEPPER in .env}
+      LICENSE_ADMIN_TOKEN: ${LICENSE_ADMIN_TOKEN:?Set LICENSE_ADMIN_TOKEN in .env}
+      LICENSE_SIGNING_PRIVATE_KEY_PATH: /run/secrets/license_private_key
+    secrets:
+      - license_private_key
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    cpus: "1.0"
+    mem_limit: 512m
+
+secrets:
+  license_private_key:
+    file: ${LICENSE_SIGNING_PRIVATE_KEY_PATH:?Set the host path of the private PEM in .env}

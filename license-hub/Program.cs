@@ -5,7 +5,25 @@ using System.Text.Json.Serialization;
 using LicenseHub;
 using MongoDB.Driver;
 
-var builder = WebApplication.CreateBuilder(args);
+if (args is ["--healthcheck"])
+{
+    try
+    {
+        using var handler = new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false };
+        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(4) };
+        using var response = await client.GetAsync("http://127.0.0.1:8080/ready");
+        Environment.ExitCode = response.IsSuccessStatusCode ? 0 : 1;
+    }
+    catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException)
+    { Environment.ExitCode = 1; }
+    return;
+}
+
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args, ContentRootPath = AppContext.BaseDirectory,
+    WebRootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot")
+});
 builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 4096);
 builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow);
@@ -22,6 +40,7 @@ var mongoClient = new MongoClient(mongoUri);
 var database = mongoClient.GetDatabase(databaseName);
 var devices = database.GetCollection<DeviceDocument>("devices");
 var licenses = database.GetCollection<LicenseDocument>("licenses");
+var users = database.GetCollection<UserDocument>("users");
 var keyHasher = new LicenseKeyHasher(pepper);
 var signingPem = await File.ReadAllTextAsync(signingKeyPath);
 var signer = new EntitlementSigner(signingPem);
@@ -29,6 +48,21 @@ CryptographicOperations.ZeroMemory(pepper);
 var now = () => DateTime.UtcNow;
 
 var app = builder.Build();
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/admin") || context.Request.Path.StartsWithSegments("/api/v1/admin"))
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+        context.Response.Headers["Referrer-Policy"] = "no-referrer";
+        context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    }
+    await next(context);
+});
+app.UseDefaultFiles();
+app.UseStaticFiles();
+app.MapGet("/", () => Results.Redirect("/admin/"));
+app.MapGet("/admin", () => Results.File(Path.Combine(AppContext.BaseDirectory, "wwwroot", "admin", "index.html"), "text/html; charset=utf-8"));
 
 var deviceHashIndex = new CreateIndexModel<DeviceDocument>(
     Builders<DeviceDocument>.IndexKeys.Ascending(item => item.DeviceHash),
@@ -38,9 +72,24 @@ var licenseHashIndex = new CreateIndexModel<LicenseDocument>(
     new CreateIndexOptions { Unique = true, Name = "license_key_hash_unique" });
 await devices.Indexes.CreateOneAsync(deviceHashIndex);
 await licenses.Indexes.CreateOneAsync(licenseHashIndex);
+await users.Indexes.CreateOneAsync(new CreateIndexModel<UserDocument>(
+    Builders<UserDocument>.IndexKeys.Ascending(item => item.Email),
+    new CreateIndexOptions { Unique = true, Name = "user_email_unique" }));
 await mongoClient.GetDatabase("admin").RunCommandAsync<MongoDB.Bson.BsonDocument>(new MongoDB.Bson.BsonDocument("ping", 1));
 
 app.MapGet("/health", () => Results.Ok(new { ok = true }));
+app.MapGet("/ready", async (CancellationToken cancellationToken) =>
+{
+    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+    timeout.CancelAfter(TimeSpan.FromSeconds(3));
+    try
+    {
+        await database.RunCommandAsync<MongoDB.Bson.BsonDocument>(new MongoDB.Bson.BsonDocument("ping", 1), cancellationToken: timeout.Token);
+        return Results.Ok(new { ok = true });
+    }
+    catch (Exception ex) when (ex is MongoException or OperationCanceledException)
+    { return Results.StatusCode(503); }
+});
 
 app.MapPost("/api/v1/devices/verify", async (VerifyRequest request, CancellationToken cancellationToken) =>
 {
@@ -81,6 +130,8 @@ app.MapPost("/api/v1/devices/verify", async (VerifyRequest request, Cancellation
             await devices.UpdateOneAsync(filter, Builders<DeviceDocument>.Update.Set(item => item.Status, device.Status),
                 cancellationToken: cancellationToken);
         }
+        else if (!await UserEnabled(linked.UserId, cancellationToken))
+            return Results.Ok(Entitle(request.DeviceHash, "banned", instant, instant.AddMinutes(1), linked.Id, linked.Tier));
     }
     var (expiry, licenseId, tier) = device.Status switch
     {
@@ -103,6 +154,8 @@ app.MapPost("/api/v1/licenses/activate", async (ActivateRequest request, Cancell
     var license = await licenses.Find(item => item.LicenseKeyHash == keyHash).FirstOrDefaultAsync(cancellationToken);
     if (license is null || !license.IsActive || (license.ExpiresAt is not null && instant >= license.ExpiresAt))
         return Results.BadRequest(new { error = "License key is invalid or inactive." });
+    if (!await UserEnabled(license.UserId, cancellationToken))
+        return Results.Json(new { error = "The account linked to this license is disabled." }, statusCode: 403);
     var deviceFilter = Builders<DeviceDocument>.Filter.Eq(item => item.DeviceHash, request.DeviceHash);
     var device = await devices.Find(deviceFilter).FirstOrDefaultAsync(cancellationToken);
     if (device is null)
@@ -161,11 +214,13 @@ app.MapPost("/api/v1/admin/licenses", async (CreateLicenseRequest request, HttpR
         (request.Tier == "lifetime" && request.ExpiresAt is not null) ||
         (request.Tier != "lifetime" && (request.ExpiresAt is null || request.ExpiresAt <= now())))
         return Results.BadRequest(new { error = "Invalid license configuration." });
+    if (request.UserId is not null && !await UserEnabled(request.UserId, cancellationToken))
+        return Results.BadRequest(new { error = "Linked user is missing or disabled." });
     var rawKey = EntitlementSigner.CreateLicenseKey();
     var document = new LicenseDocument
     {
         LicenseKeyHash = keyHasher.Hash(rawKey), Tier = request.Tier, MaxDevices = request.MaxDevices,
-        CreatedAt = now(), ExpiresAt = request.ExpiresAt?.ToUniversalTime(), IsActive = true
+        CreatedAt = now(), ExpiresAt = request.ExpiresAt?.ToUniversalTime(), IsActive = true, UserId = request.UserId
     };
     await licenses.InsertOneAsync(document, cancellationToken: cancellationToken);
     return Results.Created($"/api/v1/admin/licenses/{document.Id}",
@@ -183,7 +238,14 @@ app.MapPost("/api/v1/admin/licenses/{id}/revoke", async (string id, HttpRequest 
     return Results.Ok(new { revoked = true });
 });
 
+AdminEndpoints.Map(app, users, licenses, devices, request => AdminAuthorized(request, adminToken));
 app.Run();
+
+async Task<bool> UserEnabled(string? userId, CancellationToken cancellationToken)
+{
+    if (userId is null) return true;
+    return await users.Find(item => item.Id == userId && item.IsEnabled).AnyAsync(cancellationToken);
+}
 
 static string Required(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } value
     ? value

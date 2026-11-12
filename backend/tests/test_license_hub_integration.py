@@ -181,3 +181,58 @@ def test_live_hub_trial_activation_device_limit_transfer_revoke_and_privacy(live
         json={"device_hash": transfer_target}, trust_env=False)
     assert verify_envelope(after_revoke.json(), public_pem, transfer_target).status == "revoked"
     assert datetime.now(timezone.utc) >= first_entitlement.issued_at
+
+
+def test_admin_console_user_management_auth_and_account_license_enforcement(live_hub):
+    base_url, public_pem = live_hub
+    admin = {"Authorization": "Bearer local-integration-admin-token-not-for-production-0001"}
+    page = httpx.get(base_url + "/admin/", trust_env=False)
+    assert page.status_code == 200 and "License Admin" in page.text
+    assert httpx.get(base_url + "/ready", trust_env=False).status_code == 200
+    assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+    assert page.headers["cache-control"] == "no-store"
+    assert page.headers["referrer-policy"] == "no-referrer"
+    for asset in ("admin.css", "admin.js"):
+        assert httpx.get(base_url + "/admin/" + asset, trust_env=False).status_code == 200
+    for name in ("summary", "users", "licenses", "devices"):
+        assert httpx.get(base_url + "/api/v1/admin/" + name, trust_env=False).status_code == 401
+    user_body = {"display_name": "Synthetic Admin Fixture", "email": "fixture@example.invalid", "is_enabled": True}
+    assert httpx.post(base_url + "/api/v1/admin/users", json=user_body, trust_env=False).status_code == 401
+    invalid = httpx.post(base_url + "/api/v1/admin/users", headers=admin,
+                         json={**user_body, "email": "invalid"}, trust_env=False)
+    assert invalid.status_code == 400
+    created = httpx.post(base_url + "/api/v1/admin/users", headers=admin, json=user_body, trust_env=False)
+    assert created.status_code == 201
+    user_id = created.json()["id"]
+    duplicate = httpx.post(base_url + "/api/v1/admin/users", headers=admin,
+                           json={**user_body, "email": "FIXTURE@EXAMPLE.INVALID"}, trust_env=False)
+    assert duplicate.status_code == 409
+    assert httpx.get(base_url + "/api/v1/admin/users?limit=101", headers=admin, trust_env=False).status_code == 400
+    user_page = httpx.get(base_url + "/api/v1/admin/users?limit=1", headers=admin, trust_env=False).json()
+    assert len(user_page["items"]) == 1 and user_page["items"][0]["id"] == user_id
+
+    license_response = httpx.post(base_url + "/api/v1/admin/licenses", headers=admin,
+        json={"tier": "lifetime", "max_devices": 1, "expires_at": None, "user_id": user_id}, trust_env=False)
+    assert license_response.status_code == 201
+    key = license_response.json()["license_key"]
+    device = "c" * 64
+    assert httpx.post(base_url + "/api/v1/devices/verify", json={"device_hash": device}, trust_env=False).status_code == 200
+    activation = {"device_hash": device, "license_key": key}
+    assert httpx.post(base_url + "/api/v1/licenses/activate", json=activation, trust_env=False).status_code == 200
+    disabled = httpx.patch(base_url + "/api/v1/admin/users/" + user_id, headers=admin,
+                           json={**user_body, "is_enabled": False}, trust_env=False)
+    assert disabled.status_code == 200
+    blocked = httpx.post(base_url + "/api/v1/devices/verify", json={"device_hash": device}, trust_env=False)
+    assert verify_envelope(blocked.json(), public_pem, device).status == "banned"
+    assert httpx.post(base_url + "/api/v1/licenses/activate", json=activation, trust_env=False).status_code == 403
+    assert httpx.patch(base_url + "/api/v1/admin/users/" + user_id, headers=admin,
+                      json=user_body, trust_env=False).status_code == 200
+    restored = httpx.post(base_url + "/api/v1/devices/verify", json={"device_hash": device}, trust_env=False)
+    assert verify_envelope(restored.json(), public_pem, device).status == "active"
+    for name in ("summary", "users", "licenses", "devices"):
+        response = httpx.get(base_url + "/api/v1/admin/" + name, headers=admin, trust_env=False)
+        assert response.status_code == 200
+        assert key not in response.text
+        assert "license_key_hash" not in response.text and "token_hash" not in response.text
+    summary = httpx.get(base_url + "/api/v1/admin/summary", headers=admin, trust_env=False).json()
+    assert summary == {"users": 1, "enabled_users": 1, "licenses": 1, "devices": 1}

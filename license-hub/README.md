@@ -2,8 +2,28 @@
 
 The License Hub implements the device-bound 14-day trial and signed entitlement
 service selected for Phase 7C. It uses .NET 8 Minimal API and MongoDB. It does
-not accept source code, prompts, email addresses, OS details, or IP fields. API
-DTOs reject unknown JSON fields and request bodies are capped at 4 KiB.
+not accept source code, prompts, email addresses, OS details, or IP fields in
+public device/license requests. Authenticated admin endpoints can store a user's
+display name and email to assign licenses; these records are not Desktop login
+credentials. API DTOs reject unknown JSON fields and request bodies are capped
+at 4 KiB.
+
+## Admin console and self deployment
+
+The same service serves `/admin/` with an admin-token login. It lists users,
+licenses and device statuses, creates licenses, revokes licenses, and creates,
+edits or disables user profiles. Lists are authenticated, paginated, and omit raw
+license keys and key hashes. New raw keys are displayed only after creation.
+The browser keeps its admin token in memory and clears it on logout/reload.
+
+Licenses may link to `user_id`; existing unlinked licenses remain supported.
+Disabling a user denies activation and returns a signed `banned` entitlement at
+the next online verification. It does not instantly invalidate an offline cached
+entitlement. Re-enabling the user restores verification for a still-valid license.
+
+See [Docker Compose deployment](../deploy/license-hub/README.md) for the image,
+secret mounts, non-root file permissions, HTTPS/tunnel setup and update steps.
+The image never contains database credentials, admin tokens or signing keys.
 
 ## Local build and tests
 
@@ -96,6 +116,13 @@ expose a plaintext listener publicly.
   high-entropy key, and returns the raw key once. MongoDB stores only its hash.
 - `POST /api/v1/admin/licenses/{id}/revoke` disables the license. A device
   receives a signed revoked entitlement at its next online verification.
+- `GET /api/v1/admin/summary`, `/users`, `/licenses`, and `/devices` require
+  the admin bearer token. Lists accept bounded `offset` and `limit` (1–100).
+- `POST /api/v1/admin/users` and `PATCH /api/v1/admin/users/{id}` manage
+  `display_name`, normalized unique `email`, and `is_enabled`.
+- `POST /api/v1/admin/licenses` additionally accepts an optional `user_id`.
+- `/health` is liveness; `/ready` checks database connectivity. The image's
+  healthcheck uses `/ready` through its internal loopback listener.
 
 Entitlements bind to the one-way device hash and contain only status, validity
 times, feature names, tier, and opaque license ID. Desktop cache is local and
