@@ -1012,9 +1012,9 @@ def test_restart_recovery_scans_tracked_and_untracked_checkpoint_before_marking_
 
 def test_restart_checkpoint_can_only_be_requeued_after_confirmation_and_fresh_safe_scan(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "restart-requeue.sqlite3")
-    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "Application Support tiếng Việt")
     db.init_db()
-    repo_root = tmp_path / "repo"
+    repo_root = tmp_path / "Clinic Orchestrator tiếng Việt"
     (repo_root / "src").mkdir(parents=True)
     subprocess.run(["git", "init", "-b", "main", str(repo_root)], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(repo_root), "config", "user.name", "Fixture"], check=True)
