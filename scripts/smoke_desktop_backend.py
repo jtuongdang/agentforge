@@ -53,6 +53,17 @@ def read_json(url: str, headers: dict[str, str] | None = None) -> dict:
         return json.loads(response.read())
 
 
+def open_ingress(request: Request):
+    """Keep the failing packaged viewer route visible in CI logs."""
+    try:
+        return urlopen(request, timeout=5)
+    except HTTPError as exc:
+        detail = exc.read(500).decode("utf-8", errors="replace").replace("\n", " ")
+        raise RuntimeError(
+            f"Remote viewer request {request.full_url} failed with HTTP {exc.code}: {detail}"
+        ) from exc
+
+
 def post_json(url: str, payload: dict, headers: dict[str, str], expected_status: int = 200) -> dict:
     request = Request(url, data=json.dumps(payload).encode("utf-8"), headers={
         **headers, "Content-Type": "application/json"}, method="POST")
@@ -189,21 +200,21 @@ def main() -> int:
                 raise RuntimeError("Packaged sidecar did not enable the configured loopback remote gateway")
 
             ingress_headers = {"Host": "remote.example.invalid", "X-Forwarded-Proto": "https"}
-            with urlopen(Request(f"http://127.0.0.1:{gateway_port}/remote", headers=ingress_headers), timeout=5) as response:
+            with open_ingress(Request(f"http://127.0.0.1:{gateway_port}/remote", headers=ingress_headers)) as response:
                 remote_html = response.read().decode("utf-8")
                 if response.status != 200 or 'src="/remote/assets/' not in remote_html:
                     raise RuntimeError("Packaged remote browser viewer did not load from the gateway")
             if 'href="/remote/assets/favicon.svg"' not in remote_html:
                 raise RuntimeError("Remote viewer HTML does not route its favicon through the allowed prefix")
-            with urlopen(Request(f"http://127.0.0.1:{gateway_port}/remote/assets/favicon.svg",
-                                 headers=ingress_headers), timeout=5) as response:
+            with open_ingress(Request(f"http://127.0.0.1:{gateway_port}/remote/assets/favicon.svg",
+                                      headers=ingress_headers)) as response:
                 if response.status != 200 or b"<svg" not in response.read():
                     raise RuntimeError("Packaged remote viewer favicon did not load")
             asset = re.search(r'src="/remote/assets/([^\"]+)"', remote_html)
             if asset is None:
                 raise RuntimeError("Remote viewer HTML does not reference gateway-scoped assets")
-            with urlopen(Request(f"http://127.0.0.1:{gateway_port}/remote/assets/{asset.group(1)}",
-                                 headers=ingress_headers), timeout=5) as response:
+            with open_ingress(Request(f"http://127.0.0.1:{gateway_port}/remote/assets/{asset.group(1)}",
+                                      headers=ingress_headers)) as response:
                 asset_content = response.read()
                 if response.status != 200 or b"DevAgent Remote Review" not in asset_content:
                     raise RuntimeError("Packaged remote viewer asset did not load")
