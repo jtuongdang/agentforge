@@ -36,10 +36,10 @@ def main() -> None:
     manifest = directory / "release-manifest.json"
     manifest.write_text(json.dumps({"product": config["productName"], "version": config["version"],
         "target": args.target, "commit": commit, "channel": "internal-alpha",
-        "signing_verified": False, "files": files}, indent=2) + "\n", encoding="utf-8")
+        "signing_verified": False, "files": files}, indent=2) + "\n", encoding="utf-8", newline="\n")
     sums = [f"{item['sha256']}  {item['path']}" for item in files]
     sums.append(f"{digest(manifest)}  {manifest.name}")
-    (directory / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
+    (directory / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8", newline="\n")
     print(f"Recorded {len(files)} installer(s) and manifest checksums for {args.target}.")
 
 

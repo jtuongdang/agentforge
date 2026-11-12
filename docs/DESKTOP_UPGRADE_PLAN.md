@@ -9,10 +9,10 @@ Trạng thái: **đang triển khai theo phase** trên nhánh `codex/desktop-upg
 | Target | Commit | Trạng thái gần nhất |
 |---|---|---|
 | macOS Intel | `b69f3c4` | [Job 131031659954](https://github.com/jtuongdang/agentforge/actions/runs/43172793380/job/131031659954) pass build, DMG, packaged smoke và upload. Đã tải DMG về, `hdiutil verify` và SHA-256 pass. |
-| macOS ARM64 | `6aa5ad8` | [Run 43179037298](https://github.com/jtuongdang/agentforge/actions/runs/43179037298) đang build riêng; không còn bị bỏ qua khi Windows thiếu runner. |
-| Windows x64 | `3b4d6fd` | [Run 43179272029](https://github.com/jtuongdang/agentforge/actions/runs/43179272029) đã lấy được runner Windows 2022 và đang build. |
+| macOS ARM64 | `6aa5ad8` | [Run 43179037298](https://github.com/jtuongdang/agentforge/actions/runs/43179037298) pass build, DMG, packaged smoke, manifest/checksum và upload artifact (51.889.570 bytes). |
+| Windows x64 | `3b4d6fd` | [Run 43179272029](https://github.com/jtuongdang/agentforge/actions/runs/43179272029) pass build, packaged smoke, manifest/checksum và upload artifact (49.270.099 bytes). |
 
-Workflow xuất `release-manifest.json` + `SHA256SUMS` sau packaged smoke. Bản Intel cũ được tạo hai file này tại máy sau khi download, ghi đúng commit nguồn. Các target trên chưa được xác nhận publisher signing/notarization; dùng cho alpha nội bộ. Hướng dẫn: [DESKTOP_INSTALL.md](DESKTOP_INSTALL.md). Run Windows trước bị hủy với `runner_id=0`, annotation ghi không cấp được hosted runner; đây không phải lỗi compile.
+Workflow xuất `release-manifest.json` + `SHA256SUMS` sau packaged smoke. Bản Intel cũ được tạo hai file này tại máy sau khi download, ghi đúng commit nguồn. EXE/MSI Windows đã tải về và đối chiếu SHA-256 với manifest CI, đều pass. Lượt Windows tạo checksum bằng CRLF nên công cụ kiểm tra trên macOS đọc thừa ký tự cuối tên file; đã chuẩn hóa file checksum local về LF và sửa script xuất LF trên mọi OS. Các target trên chưa được xác nhận publisher signing/notarization; dùng cho alpha nội bộ. Hướng dẫn: [DESKTOP_INSTALL.md](DESKTOP_INSTALL.md). Run Windows trước bị hủy với `runner_id=0`, annotation ghi không cấp được hosted runner; đây không phải lỗi compile.
 
 ## 1. Kết luận khảo sát ban đầu (lịch sử)
 
