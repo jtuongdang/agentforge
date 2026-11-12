@@ -28,11 +28,20 @@ cd ~/Documents/ClinicOrchestrator
 
 The launcher creates `.venv`, installs the pinned Python requirements, starts FastAPI, and serves the Vite dashboard. The API binds to loopback (`127.0.0.1:8765` by default; override with `CLINIC_ORCHESTRATOR_HOST` and `CLINIC_ORCHESTRATOR_PORT`). Development data is under `data/`; packaged builds use the platform application data directory. Override it with `CLINIC_ORCHESTRATOR_DATA_DIR` or point SQLite at a specific file with `CLINIC_ORCHESTRATOR_DB`. Register any local Git checkout from the dashboard before creating tasks; startup does not assume a particular target project.
 
-## Desktop alpha (macOS)
+## Desktop alpha (macOS and Windows)
 
-Install Node.js and Rust/Cargo on the build machine, then run `npm run desktop:dev` from `dashboard/` for the Tauri shell with a source Python backend. `npm run tauri build` runs the frontend build and `scripts/build_desktop_macos.sh`; that script compiles the backend into a self-contained Nuitka sidecar for the current macOS architecture. The packaged app uses a random loopback port and platform application data directory; the installed machine does not need Python, Node.js, or npm. Cross-architecture packages must be built separately on their target architecture.
+Install Node.js and Rust/Cargo on the build machine, then run `npm run desktop:dev` from `dashboard/` for the Tauri shell with a source Python backend. `npm run tauri build` builds the frontend and runs `scripts/build_desktop.mjs` to compile the backend into a self-contained Nuitka sidecar for the host target. The packaged app uses a random loopback port and platform application data directory; the installed machine does not need Python, Node.js, or npm. Cross-architecture packages must be built separately on their target architecture.
 
-To limit build CPU usage, set `NUITKA_BUILD_JOBS=1 CARGO_BUILD_JOBS=1` before `npm run tauri build`; the Nuitka script defaults to two jobs when unset.
+To limit build CPU usage, set `NUITKA_BUILD_JOBS=1 CARGO_BUILD_JOBS=1` before `npm run tauri build`; the Nuitka script defaults to one job when unset.
+
+The **Desktop build matrix** GitHub Actions workflow accepts `arm64`, `macos-intel`,
+`windows`, or `all`. Each completed target uploads installers only after packaged
+backend smoke passes, with `release-manifest.json` and `SHA256SUMS` recording the
+version, source commit and checksums. Artifacts are retained for 14 days. Verify
+`SHA256SUMS` from the extracted artifact directory before installation. These are
+internal alpha builds; signing/notarization and automatic updates have not been
+accepted for public distribution. The License Hub `.env`, private keys, MongoDB
+credentials and test data are not packaged into the Desktop app.
 
 ## Safety boundaries
 

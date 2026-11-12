@@ -21,7 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-build-${{ github.ref }}
+  group: desktop-build-${{ github.ref }}-${{ inputs.target || 'all' }}
   cancel-in-progress: false
 
 jobs:
@@ -55,6 +55,8 @@ jobs:
       - name: Smoke packaged backend sidecar
         run: python ../scripts/smoke_desktop_backend.py src-tauri/binaries/devagent-backend-x86_64-apple-darwin
         working-directory: dashboard
+      - name: Record installer checksums and provenance
+        run: python scripts/desktop_release_manifest.py dashboard/src-tauri/target/release/bundle --target x86_64-apple-darwin
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-x86_64-apple-darwin
@@ -65,7 +67,7 @@ jobs:
   windows:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'windows' }}
     name: x86_64-pc-windows-msvc
-    runs-on: windows-2025
+    runs-on: windows-latest
     env:
       NUITKA_BUILD_JOBS: 2
       CARGO_BUILD_JOBS: 2
@@ -89,6 +91,8 @@ jobs:
       - name: Smoke packaged backend sidecar
         run: python ../scripts/smoke_desktop_backend.py src-tauri/binaries/devagent-backend-x86_64-pc-windows-msvc.exe
         working-directory: dashboard
+      - name: Record installer checksums and provenance
+        run: python scripts/desktop_release_manifest.py dashboard/src-tauri/target/release/bundle --target x86_64-pc-windows-msvc
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-x86_64-pc-windows-msvc
@@ -99,9 +103,7 @@ jobs:
   arm64:
     if: >-
       ${{ always() &&
-          (github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'arm64') &&
-          (needs.macos-intel.result == 'success' || needs.macos-intel.result == 'skipped') &&
-          (needs.windows.result == 'success' || needs.windows.result == 'skipped') }}
+          (github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'arm64') }}
     needs:
       - macos-intel
       - windows
@@ -133,6 +135,8 @@ jobs:
       - name: Smoke packaged backend sidecar
         run: python ../scripts/smoke_desktop_backend.py src-tauri/binaries/devagent-backend-aarch64-apple-darwin
         working-directory: dashboard
+      - name: Record installer checksums and provenance
+        run: python scripts/desktop_release_manifest.py dashboard/src-tauri/target/release/bundle --target aarch64-apple-darwin
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-aarch64-apple-darwin
