@@ -15,6 +15,17 @@ from app.registry import AgentRegistry
 from app.git_ops import task_diff
 
 
+def test_desktop_entry_resolves_embedded_viewer_from_onefile_directory(tmp_path):
+    from desktop_entry import dashboard_dist_for_entrypoint
+
+    entrypoint = tmp_path / "onefile" / "desktop_entry.py"
+    compiled_dist = dashboard_dist_for_entrypoint(entrypoint, compiled_onefile=True)
+    development_dist = dashboard_dist_for_entrypoint(entrypoint, compiled_onefile=False)
+
+    assert compiled_dist == tmp_path / "onefile" / "dashboard" / "dist"
+    assert development_dist == tmp_path / "dashboard" / "dist"
+
+
 def authenticated_test_client(monkeypatch):
     monkeypatch.setattr("app.main._local_api_token", lambda: "fixture-local-api-token")
     return TestClient(app, headers={"Authorization": "Bearer fixture-local-api-token",

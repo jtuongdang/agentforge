@@ -1243,7 +1243,10 @@ def history(limit: int = 100):
     return reporting.history(limit)
 
 
-DASHBOARD_DIST = Path(__file__).resolve().parents[2] / "dashboard" / "dist"
+DASHBOARD_DIST = Path(os.environ.get(
+    "CLINIC_ORCHESTRATOR_DASHBOARD_DIST",
+    Path(__file__).resolve().parents[2] / "dashboard" / "dist",
+)).expanduser().resolve()
 @app.get("/remote", include_in_schema=False)
 @app.get("/remote/", include_in_schema=False)
 def remote_viewer_index(request: Request):

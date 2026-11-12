@@ -12,6 +12,13 @@ BACKEND_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(BACKEND_ROOT))
 
 
+def dashboard_dist_for_entrypoint(entrypoint: str | Path, *, compiled_onefile: bool) -> Path:
+    """Find data embedded beside Nuitka's extracted entrypoint, or the repo copy in development."""
+    entrypoint_dir = Path(entrypoint).resolve().parent
+    project_root = entrypoint_dir if compiled_onefile else entrypoint_dir.parent
+    return project_root / "dashboard" / "dist"
+
+
 async def serve() -> None:
     import uvicorn
     from app.remote_pairing import remote_boundary_enabled
@@ -47,6 +54,11 @@ async def serve() -> None:
     os.environ["CLINIC_ORCHESTRATOR_HOST"] = bind_host
     os.environ["CLINIC_ORCHESTRATOR_PORT"] = str(port)
     os.environ["CLINIC_ORCHESTRATOR_HEADLESS"] = "1"
+
+    dashboard_dist = dashboard_dist_for_entrypoint(
+        __file__, compiled_onefile=bool(globals().get("__compiled__")))
+    if (dashboard_dist / "index.html").is_file():
+        os.environ["CLINIC_ORCHESTRATOR_DASHBOARD_DIST"] = str(dashboard_dist)
 
     from app.main import app
     config = uvicorn.Config(app, host=bind_host, port=port, log_level="warning", access_log=False)
