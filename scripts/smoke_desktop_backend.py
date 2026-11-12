@@ -84,7 +84,7 @@ def verify_packaged_crash_guard(binary: Path, temp: Path) -> None:
         "os.environ['CLINIC_ORCHESTRATOR_WATCHDOG_EXECUTABLE']=sys.argv[2]; "
         "from app.processes import create_managed_process,process_group_options\n"
         "async def main():\n"
-        "    child=\"import pathlib,sys,time; time.sleep(1.0); pathlib.Path(sys.argv[1]).write_text('survived')\"\n"
+        "    child=\"import pathlib,sys,time; time.sleep(3.0); pathlib.Path(sys.argv[1]).write_text('survived')\"\n"
         "    await create_managed_process(sys.executable,'-c',child,%r,stdout=asyncio.subprocess.DEVNULL,"
         "stderr=asyncio.subprocess.DEVNULL,**process_group_options())\n"
         "    pathlib.Path(sys.argv[3]).write_text('ready')\n"
