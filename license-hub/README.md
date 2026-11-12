@@ -34,6 +34,24 @@ Provide these environment variables through the deployment secret manager:
 | `LICENSE_KEY_PEPPER` | Base64-encoded random secret of at least 32 bytes for HMAC hashing license keys |
 | `LICENSE_ADMIN_TOKEN` | Random admin bearer secret of at least 32 bytes |
 
+## Container deployment
+
+Build from the License Hub directory so the desktop application and local files
+are not sent as part of the build context:
+
+```sh
+docker build -f license-hub/Dockerfile -t clinic-license-hub:local license-hub
+```
+
+Run the container on a private network and provide the environment values from
+the host's secret manager. Mount the signing key read-only at the path provided
+by `LICENSE_SIGNING_PRIVATE_KEY_PATH`; do not copy it into the image or build
+context. Port 8080 is plaintext inside the private container network and must
+only be reachable through the operator-managed HTTPS ingress. Do not publish
+the container port directly to the Internet. Configure the ingress to suppress
+request-body logs and restrict `/api/v1/admin/*` to the operator's management
+network.
+
 Create signing material outside the repository and distribute only the public
 key to desktop builds:
 
@@ -73,9 +91,10 @@ available if AI entitlement is denied.
 
 ## Not deployed yet
 
-This repository contains the service implementation and unit tests, but no
-MongoDB credentials, hosted URL, TLS ingress, production RSA key, signing-key
-rotation policy, CI deployment, or production license records. Validate trial
-creation/expiry, concurrent activation limits, deactivation, revocation,
-MongoDB failure recovery, and the desktop public-key pin against an isolated
-staging database before enabling it for users.
+This repository contains the service implementation, unit/integration tests,
+and a non-root container image definition, but no MongoDB credentials, hosted
+URL, TLS ingress, production RSA key, signing-key rotation policy, CI
+deployment, or production license records. Validate trial creation/expiry,
+concurrent activation limits, deactivation, revocation, MongoDB failure
+recovery, and the desktop public-key pin against an isolated staging database
+before enabling it for users.

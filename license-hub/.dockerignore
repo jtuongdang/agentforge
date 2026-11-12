@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+bin/
+obj/
+*.pem
+*.key
+*.pfx
+*.p12
+secrets/
