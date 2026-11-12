@@ -2,8 +2,8 @@
 
 Image đã push và xác minh registry ngày 12/11/2026: [jtuongdev/agentforge-admin](https://hub.docker.com/r/jtuongdev/agentforge-admin), tag `0.1.0-admin.1`, Linux amd64 và arm64.
 
-Digest cố định: `sha256:55c681c07c43d384b57bcd043f31c7b5a97a4725c1c51ffa780eee0c04c34782`.
-Có thể đặt `LICENSE_HUB_IMAGE=jtuongdev/agentforge-admin@sha256:55c681c07c43d384b57bcd043f31c7b5a97a4725c1c51ffa780eee0c04c34782` để pin đúng bản đã kiểm tra.
+Digest cố định: `sha256:9bdba684a6fac0003b6467ab8f04d49984564b46b650abadf980d48bf5bc0e52`.
+Có thể đặt `LICENSE_HUB_IMAGE=jtuongdev/agentforge-admin@sha256:9bdba684a6fac0003b6467ab8f04d49984564b46b650abadf980d48bf5bc0e52` để pin đúng bản đã kiểm tra.
 
  Đây là container License Hub + admin web, không chứa Desktop
 worker, credential MongoDB, admin token hoặc private signing key.

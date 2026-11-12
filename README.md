@@ -30,15 +30,14 @@ The launcher creates `.venv`, installs the pinned Python requirements, starts Fa
 
 ## Desktop alpha (macOS and Windows)
 
-Download [v0.1.0-alpha.2](https://github.com/jtuongdang/agentforge/releases/tag/v0.1.0-alpha.2), an internal alpha prerelease (built from `af333ea` on `codex/desktop-upgrade`):
+Download [v0.1.0-alpha.3](https://github.com/jtuongdang/agentforge/releases/tag/v0.1.0-alpha.3), an internal alpha prerelease (built from `af333ea` on `codex/desktop-upgrade`):
 
 | Platform | Installer |
 |---|---|
-| macOS Apple silicon | Pending CI (`aarch64-apple-darwin` queued in run `43225494967`); previous build: [alpha.1 ARM64 DMG](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.1/DevAgent-Orchestrator_0.1.0_macos-arm64.dmg) |
-| macOS Intel | [x64 DMG](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.2/DevAgent-Orchestrator_0.1.0_macos-x64.dmg) |
-| Windows x64 | [EXE](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.2/DevAgent-Orchestrator_0.1.0_windows-x64-setup.exe) or [MSI](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.2/DevAgent-Orchestrator_0.1.0_windows-x64.msi) |
+| macOS Apple silicon | [ARM64 DMG](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.3/DevAgent-Orchestrator_0.1.0_macos-arm64.dmg) |
+| Windows x64 | [EXE](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.3/DevAgent-Orchestrator_0.1.0_windows-x64-setup.exe) or [MSI](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.3/DevAgent-Orchestrator_0.1.0_windows-x64.msi) |
 
-The release includes [SHA256SUMS](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.2/SHA256SUMS), a source manifest and installation instructions. The `x86_64-apple-darwin` and `x86_64-pc-windows-msvc` builds passed packaged backend smoke and SHA-256 verification against CI manifests. The alpha is unsigned/not notarized and is not a production release.
+The release includes [SHA256SUMS](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.3/SHA256SUMS) and [INSTALL.md](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.3/INSTALL.md). The Apple silicon DMG passed `hdiutil verify`; the Windows x64 installers are from CI run `43225494967` (packaged backend smoke and SHA-256 verified). Earlier `v0.1.0-alpha.1` and `v0.1.0-alpha.2` tags were revoked. The alpha is unsigned/not notarized and is not a production release.
 
 Install Node.js and Rust/Cargo on the build machine, then run `npm run desktop:dev` from `dashboard/` for the Tauri shell with a source Python backend. `npm run tauri build` builds the frontend and runs `scripts/build_desktop.mjs` to compile the backend into a self-contained Nuitka sidecar for the host target. The packaged app uses a random loopback port and platform application data directory; the installed machine does not need Python, Node.js, or npm. Cross-architecture packages must be built separately on their target architecture.
 
@@ -73,14 +72,16 @@ Google AgentForge identity, broker sessions and per-user profiles remain under
 implementation; CLI login does not fulfill Google verification. See the
 [approved linking proposal](docs/DESKTOP_ACCOUNT_AGENT_LINKING_PROPOSAL.md) and
 [current implementation checkpoint](docs/ACCOUNT_LINKING_PROGRESS.md). The
-`v0.1.0-alpha.2` installers (macOS Intel and Windows x64) include the account
-directory sync, Desktop AccountPanel and EN/VI i18n updates from `af333ea`.
+`v0.1.0-alpha.3` installers (macOS Apple silicon and Windows x64) include the
+account directory sync, Desktop `AccountPanel` and auto/EN/VI i18n updates from
+`af333ea`.
 
 License Hub + user/license/device admin is published at
 [Docker Hub](https://hub.docker.com/r/jtuongdev/agentforge-admin), tag
-`0.1.0-admin.1`, for Linux amd64/arm64. Follow the
-[self-deployment guide](deploy/license-hub/README.md); this image has admin user
-profiles, without Google Desktop login.
+`0.1.0-admin.1` (`sha256:9bdba684a6fac0003b6467ab8f04d49984564b46b650abadf980d48bf5bc0e52`),
+for Linux amd64/arm64, and deployed at
+[agentforge-admin-0-1-0-admin-1.onrender.com/admin/](https://agentforge-admin-0-1-0-admin-1.onrender.com/admin/).
+Follow the [self-deployment guide](deploy/license-hub/README.md).
 
 ## Safety boundaries
 
