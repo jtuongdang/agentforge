@@ -4,7 +4,17 @@ Ngày khảo sát ban đầu: **11/11/2026**. Ngày rà soát bổ sung: **11/11
 
 Trạng thái: **đang triển khai theo phase** trên nhánh `codex/desktop-upgrade`, đồng bộ với repository `jtuongdang/agentforge`. Phần khảo sát ban đầu dưới đây được giữ làm lịch sử; tiến độ thực thi cập nhật ở mục Phase 0. Tài liệu này phân biệt yêu cầu trong spec, bằng chứng từ mã nguồn và quyết định kiến trúc đề xuất. Mã nguồn được dẫn theo phiên bản đang có trong workspace; số dòng có thể thay đổi sau refactor.
 
-## 1. Kết luận để quyết định triển khai
+### Đóng gói nội bộ — cập nhật 12/11/2026
+
+| Target | Commit | Trạng thái gần nhất |
+|---|---|---|
+| macOS Intel | `b69f3c4` | [Job 131031659954](https://github.com/jtuongdang/agentforge/actions/runs/43172793380/job/131031659954) pass build, DMG, packaged smoke và upload. Đã tải DMG về, `hdiutil verify` và SHA-256 pass. |
+| macOS ARM64 | `6aa5ad8` | [Run 43179037298](https://github.com/jtuongdang/agentforge/actions/runs/43179037298) đang build riêng; không còn bị bỏ qua khi Windows thiếu runner. |
+| Windows x64 | `3b4d6fd` | [Run 43179272029](https://github.com/jtuongdang/agentforge/actions/runs/43179272029) đã lấy được runner Windows 2022 và đang build. |
+
+Workflow xuất `release-manifest.json` + `SHA256SUMS` sau packaged smoke. Bản Intel cũ được tạo hai file này tại máy sau khi download, ghi đúng commit nguồn. Các target trên chưa được xác nhận publisher signing/notarization; dùng cho alpha nội bộ. Hướng dẫn: [DESKTOP_INSTALL.md](DESKTOP_INSTALL.md). Run Windows trước bị hủy với `runner_id=0`, annotation ghi không cấp được hosted runner; đây không phải lỗi compile.
+
+## 1. Kết luận khảo sát ban đầu (lịch sử)
 
 Hệ thống hiện tại là một **orchestrator local có dashboard web**, đã có scheduler, worktree, contract gate, CLI adapters, validation, bounded recovery, lịch sử và RAG tài liệu. Chưa có Desktop shell, onboarding native, fleet slots, phiên Tech Lead, rescue worker, license hub hay remote pairing.
 

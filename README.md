@@ -43,6 +43,9 @@ internal alpha builds; signing/notarization and automatic updates have not been
 accepted for public distribution. The License Hub `.env`, private keys, MongoDB
 credentials and test data are not packaged into the Desktop app.
 
+See [Desktop installation and recovery](docs/DESKTOP_INSTALL.md) for package
+selection, checksum verification, first launch and backup instructions.
+
 ## Safety boundaries
 
 - Each task selects a base branch (defaulting to the repository's configured default); the Agent gets a dedicated worktree and a meaningful task branch such as `orchestrator/fix-phone-validation`. The checked-out project directory remains untouched, and uncommitted changes are never copied into the worktree.
