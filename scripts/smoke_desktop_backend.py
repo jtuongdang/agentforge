@@ -240,8 +240,10 @@ def main() -> int:
                 integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
                 remote_tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
                                  if row[0].startswith("remote_")}
-            if version < 8 or integrity != "ok" or not {
-                    "remote_invites", "remote_pairing_requests", "remote_devices", "remote_task_diff_grants"}.issubset(remote_tables):
+                tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if version < 9 or integrity != "ok" or not {
+                    "remote_invites", "remote_pairing_requests", "remote_devices", "remote_task_diff_grants"}.issubset(remote_tables) \
+                    or "license_cache" not in tables:
                 raise RuntimeError(f"Packaged database failed checks: schema={version}, integrity={integrity}")
             headers = {"Authorization": f"Bearer {token}"}
             provider = post_json(base + "/api/providers", {

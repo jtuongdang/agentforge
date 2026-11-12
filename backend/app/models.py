@@ -141,6 +141,10 @@ class CompleteHandoff(BaseModel):
     report: str = Field(min_length=3, max_length=5000)
 
 
+class RestartRecoveryRequest(BaseModel):
+    confirmation: str = Field(min_length=1, max_length=80)
+
+
 class FleetSettingsUpdate(BaseModel):
     max_active_runs: int | None = Field(default=None, ge=1, le=32)
     max_parallel_builds: int | None = Field(default=None, ge=1, le=16)

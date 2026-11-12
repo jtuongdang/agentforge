@@ -134,13 +134,26 @@ def create_worktree(repo: dict, task_id: str, base_ref: str, title: str) -> tupl
     slug = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", slug.lower()).strip("-")[:52].rstrip("-") or "task"
     root_branch = f"orchestrator/{slug}"
+    worktree = db.DATA_ROOT / "worktrees" / repo["id"] / task_id
+    if worktree.exists() or worktree.is_symlink():
+        if worktree.is_symlink() or not worktree.is_dir():
+            raise RuntimeError("Existing task worktree path is not a managed directory")
+        worktree_root = run(["git", "rev-parse", "--show-toplevel"], worktree)
+        branch_result = run(["git", "branch", "--show-current"], worktree)
+        registered = run(["git", "worktree", "list", "--porcelain"], root)
+        registered_path = f"worktree {worktree.resolve()}"
+        if (registered.returncode != 0 or registered_path not in registered.stdout.splitlines()
+                or worktree_root.returncode != 0 or Path(worktree_root.stdout.strip()).resolve() != worktree.resolve()
+                or branch_result.returncode != 0 or not branch_result.stdout.strip().startswith("orchestrator/")):
+            raise RuntimeError("Existing task worktree failed ownership checks")
+        return branch_result.stdout.strip(), str(worktree)
+
     branch = root_branch
     suffix = 2
     while any(run(["git", "show-ref", "--verify", "--quiet", ref], root).returncode == 0
               for ref in (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}")):
         branch = f"{root_branch}-{suffix}"
         suffix += 1
-    worktree = db.DATA_ROOT / "worktrees" / repo["id"] / task_id
     worktree.parent.mkdir(parents=True, exist_ok=True)
     require_ok(["git", "worktree", "add", "-b", branch, str(worktree), base], root, timeout=120)
     return branch, str(worktree)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import json
+from pathlib import Path
 
 import pytest
 
@@ -1007,6 +1008,69 @@ def test_restart_recovery_scans_tracked_and_untracked_checkpoint_before_marking_
     assert report["checkpoint"]["scanned"] is True
     assert report["checkpoint"]["changed_paths"] == ["src/main.py", "src/settings.py"]
     assert report["checkpoint"]["possible_secret_files"] == ["src/settings.py"]
+
+
+def test_restart_checkpoint_can_only_be_requeued_after_confirmation_and_fresh_safe_scan(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "restart-requeue.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    repo_root = tmp_path / "repo"
+    (repo_root / "src").mkdir(parents=True)
+    subprocess.run(["git", "init", "-b", "main", str(repo_root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_root), "config", "user.name", "Fixture"], check=True)
+    subprocess.run(["git", "-C", str(repo_root), "config", "user.email", "fixture@example.invalid"], check=True)
+    source = repo_root / "src" / "main.py"
+    source.write_text("original = True\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_root), "add", "src/main.py"], check=True)
+    subprocess.run(["git", "-C", str(repo_root), "commit", "-m", "base"], check=True, capture_output=True)
+    base_sha = subprocess.run(["git", "-C", str(repo_root), "rev-parse", "HEAD"], check=True,
+                              capture_output=True, text=True).stdout.strip()
+    from app.git_ops import create_worktree
+    branch, worktree = create_worktree({"id": "repo", "path": str(repo_root)}, "task-restart",
+                                       base_sha, "Restart checkpoint")
+    changed = Path(worktree) / "src" / "main.py"
+    changed.write_text("edited = True\n", encoding="utf-8")
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path,default_branch) VALUES('repo','Fixture',?,'main')",
+                    (str(repo_root),))
+        con.execute("INSERT INTO agents(id,name,adapter,command,capabilities,file_globs) "
+                    "VALUES('agent','Fixture agent','exec','[]','[]','[\"src/*.py\"]')")
+        con.execute("""INSERT INTO tasks(id,title,objective,repository_id,base_branch,base_sha,status,
+            assigned_agent_id,file_globs,branch,worktree) VALUES('task-restart','Restart checkpoint',
+            'Inspect and safely retry this interrupted task','repo','main',?,'failed','agent','[\"src/*.py\"]',?,?)""",
+                    (base_sha, branch, worktree))
+        con.execute("INSERT INTO runs(id,task_id,agent_id,state,report) VALUES('run-restart','task-restart','agent',?,'{}')",
+                    ("interrupted",))
+        con.execute("UPDATE runs SET report=? WHERE id='run-restart'", (db.dumps({
+            "failure_class": "restart_interrupted",
+            "checkpoint": {"scanned": True, "changed_paths": ["src/main.py"],
+                           "outside_scope": [], "possible_secret_files": []}}),))
+        con.execute("INSERT INTO task_writer_leases(task_id,lease_id,run_id,agent_id,state) "
+                    "VALUES('task-restart','lease-restart','run-restart','agent','orphaned')")
+
+    client = authenticated_test_client(monkeypatch)
+    with client:
+        wrong = client.post("/api/tasks/task-restart/recover-restart", json={"confirmation": "yes"})
+        assert wrong.status_code == 422
+        changed.write_text('token="ghp_abcdefghijklmnopqrstuvwxyz123456"\n', encoding="utf-8")
+        unsafe = client.post("/api/tasks/task-restart/recover-restart",
+                             json={"confirmation": "REQUEUE task-res"})
+        assert unsafe.status_code == 409
+        assert unsafe.json()["detail"].startswith("Checkpoint changed or failed")
+        changed.write_text("edited = True\n", encoding="utf-8")
+        recovered = client.post("/api/tasks/task-restart/recover-restart",
+                                json={"confirmation": "REQUEUE task-res"})
+
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["status"] == "queued"
+    assert recovered.json()["worktree"] == worktree
+    assert recovered.json()["branch"] == branch
+    assert changed.read_text(encoding="utf-8") == "edited = True\n"
+    with db.connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM task_writer_leases WHERE task_id='task-restart'").fetchone()[0] == 0
+        event = con.execute("SELECT kind,details FROM events WHERE task_id='task-restart' ORDER BY id DESC LIMIT 1").fetchone()
+    assert event["kind"] == "restart_requeued"
+    assert json.loads(event["details"])["changed_paths"] == ["src/main.py"]
 
 
 def test_writer_lease_excludes_parallel_writer_and_requires_current_owner_for_transfer(tmp_path, monkeypatch):

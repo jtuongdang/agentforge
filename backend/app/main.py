@@ -33,7 +33,7 @@ from .git_ops import (changed_paths, check_repository_sync, is_github_remote, li
                       validated_revision_is_current)
 from .models import (AgentCreate, CompleteHandoff, ContractCreate, FleetSettingsUpdate, LeadHandshake,
                      LeadPairingCreate, LeadReview, ProjectCheckpointCreate, ProjectCheckpointRestore,
-                     LicenseActivation,
+                     LicenseActivation, RestartRecoveryRequest,
                      ProviderConnectionCreate, ProviderConnectionUpdate,
                      RemoteDiffGrant, RemotePairingPoll, RemotePairingRequest, RemoteWsTicketRequest,
                      RepositoryCreate, RepositoryPreflight, TaskCreate)
@@ -1123,6 +1123,78 @@ def get_task_details(task_id: str):
                             "FROM task_writer_leases WHERE task_id=?", (task_id,)).fetchone()
     task["writer_lease"] = dict(lease) if lease else None
     return task
+
+
+@app.post("/api/tasks/{task_id}/recover-restart")
+def recover_interrupted_task(task_id: str, body: RestartRecoveryRequest):
+    task = get_task(task_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    expected_confirmation = f"REQUEUE {task_id[:8]}"
+    if not hmac.compare_digest(body.confirmation, expected_confirmation):
+        raise HTTPException(422, f"Type {expected_confirmation} to confirm restart recovery")
+    if task["status"] != "failed" or not task.get("worktree"):
+        raise HTTPException(409, "Only a failed task with a retained restart checkpoint can be recovered")
+
+    managed_root = (db.DATA_ROOT / "worktrees" / task["repository_id"] / task_id).resolve()
+    worktree_path = Path(task["worktree"])
+    try:
+        resolved_worktree = worktree_path.resolve(strict=True)
+    except OSError as exc:
+        raise HTTPException(409, "The retained task worktree is missing; it was not requeued") from exc
+    if worktree_path.is_symlink() or resolved_worktree != managed_root or not resolved_worktree.is_dir():
+        raise HTTPException(409, "The retained worktree is outside its managed task directory")
+
+    with db.connect() as con:
+        lease = con.execute("SELECT state FROM task_writer_leases WHERE task_id=?", (task_id,)).fetchone()
+        last_run = con.execute("SELECT state,report FROM runs WHERE task_id=? ORDER BY rowid DESC LIMIT 1",
+                               (task_id,)).fetchone()
+        agent = con.execute("SELECT file_globs FROM agents WHERE id=?", (task.get("assigned_agent_id"),)).fetchone()
+    if lease is None or lease["state"] != "orphaned" or last_run is None or last_run["state"] != "interrupted":
+        raise HTTPException(409, "Task does not have an orphaned lease from an interrupted run")
+    try:
+        report = json.loads(last_run["report"] or "{}")
+        checkpoint = report.get("checkpoint") or {}
+        if report.get("failure_class") != "restart_interrupted" or not checkpoint.get("scanned"):
+            raise ValueError
+        if checkpoint.get("scan_error") or checkpoint.get("outside_scope") or checkpoint.get("possible_secret_files"):
+            raise ValueError
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(409, "Restart checkpoint is unsafe or has not passed its initial scan") from exc
+    if not agent:
+        raise HTTPException(409, "The previous agent is missing; restore it before recovering this task")
+
+    try:
+        top = run(["git", "rev-parse", "--show-toplevel"], resolved_worktree)
+        branch = run(["git", "branch", "--show-current"], resolved_worktree)
+        base_ref = task.get("base_sha") or task.get("base_branch")
+        if (top.returncode != 0 or Path(top.stdout.strip()).resolve() != resolved_worktree
+                or branch.returncode != 0 or not branch.stdout.strip().startswith("orchestrator/")
+                or not base_ref):
+            raise ValueError
+        paths = changed_paths(str(resolved_worktree), base_ref)
+        outside = validation_engine.inspect_scope(paths, task["file_globs"], json.loads(agent["file_globs"] or "[]"))
+        secret_files = validation_engine.inspect_secrets(str(resolved_worktree), paths)
+        if outside or secret_files:
+            raise ValueError
+    except Exception as exc:
+        raise HTTPException(409, "Checkpoint changed or failed a fresh path, scope, or secret scan; inspect it manually") from exc
+
+    with db.transaction() as con:
+        con.execute("BEGIN IMMEDIATE")
+        current = con.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        current_lease = con.execute("SELECT state FROM task_writer_leases WHERE task_id=?", (task_id,)).fetchone()
+        if current is None or current["status"] != "failed" or current_lease is None or current_lease["state"] != "orphaned":
+            raise HTTPException(409, "Task or writer lease changed while recovery was being checked")
+        con.execute("DELETE FROM task_writer_leases WHERE task_id=? AND state='orphaned'", (task_id,))
+        con.execute("""UPDATE tasks SET status='queued',assigned_agent_id=NULL,error=NULL,validation='{}',
+            finished_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?""", (task_id,))
+        con.execute("INSERT INTO events(task_id,kind,message,details) VALUES(?,?,?,?)",
+                    (task_id, "restart_requeued",
+                     "Owner reviewed the retained restart checkpoint and explicitly requeued the task on its existing worktree.",
+                     db.dumps({"retained_worktree": str(resolved_worktree), "changed_paths": paths,
+                               "checkpoint_review_confirmed": True})))
+    return task_row(task_id)
 
 
 @app.get("/api/tasks/{task_id}/events")
