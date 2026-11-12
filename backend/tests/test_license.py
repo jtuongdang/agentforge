@@ -186,3 +186,18 @@ def test_license_device_hash_is_not_sent_before_privacy_consent(tmp_path, monkey
     service.grant_consent()
     with db.connect() as con:
         assert con.execute("SELECT COUNT(*) FROM system_settings WHERE key='license.privacy_ack_at'").fetchone()[0] == 1
+
+
+def test_required_license_without_hub_fails_closed_but_keeps_local_data(monkeypatch):
+    from app import license as license_module
+
+    monkeypatch.setenv("CLINIC_ORCHESTRATOR_LICENSE_REQUIRED", "true")
+    monkeypatch.delenv("CLINIC_ORCHESTRATOR_LICENSE_HUB_URL", raising=False)
+    monkeypatch.delenv("CLINIC_ORCHESTRATOR_LICENSE_PUBLIC_KEY_FILE", raising=False)
+    monkeypatch.setattr(license_module, "device_hash", lambda: "e" * 64)
+
+    status = LicenseService().status()
+    assert status["status"] == "unconfigured"
+    assert status["ai_execution"] is False
+    assert status["local_read"] is True
+    assert status["local_export"] is True

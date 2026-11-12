@@ -191,6 +191,12 @@ def main() -> int:
             fleet = read_json(base + "/api/fleet", {"Authorization": f"Bearer {token}"})
             if not isinstance(fleet, dict) or "settings" not in fleet:
                 raise RuntimeError("Authenticated Fleet API returned an unexpected response")
+            license_status = read_json(base + "/api/license", {"Authorization": f"Bearer {token}"})
+            if not all(key in license_status for key in ("required", "configured", "status", "ai_execution",
+                                                         "local_read", "local_export")):
+                raise RuntimeError("Packaged sidecar returned an incomplete license status")
+            if not license_status["local_read"] or not license_status["local_export"]:
+                raise RuntimeError("License state must preserve local project read and export access")
             credential_store = read_json(base + "/api/providers/credential-store", {"Authorization": f"Bearer {token}"})
             if not credential_store.get("available"):
                 raise RuntimeError("Packaged sidecar has no approved OS credential store: "
@@ -261,7 +267,9 @@ def main() -> int:
                 restored_integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
             if restored_integrity != "ok" or restored["repository_count"] != 0:
                 raise RuntimeError("Packaged restored profile failed database or repository checks")
-            print(f"Packaged sidecar smoke passed: owner API isolation, remote viewer/assets, OS credential store, schema={version}, provider metadata, checkpoint export/restore, process crash containment.")
+            print(f"Packaged sidecar smoke passed: owner API isolation, remote viewer/assets, OS credential store, "
+                  f"schema={version}, license={license_status['status']}, provider metadata, "
+                  "checkpoint export/restore, process crash containment.")
             return 0
         except Exception as exc:
             print(f"Packaged sidecar smoke failed: {exc}", file=sys.stderr)
