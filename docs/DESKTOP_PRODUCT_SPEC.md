@@ -69,8 +69,9 @@ Phần lớn các lập trình viên đều đã đăng nhập ít nhất một 
 ```
 
 ### Điểm nhấn: Điều khiển từ xa qua Điện thoại (Remote Dashboard)
-- Trên Desktop App có nút bật **"Remote Pairing"** hiển thị mã QR.
-- Lập trình viên có thể quét mã QR trên điện thoại để mở giao diện web theo dõi tiến độ và bấm duyệt PR khi đang ở ngoài phòng làm việc.
+- Remote pairing dùng VPN riêng với HTTPS ingress do operator quản lý; app chỉ khởi động gateway loopback khi được cấu hình rõ ràng.
+- Desktop App hiển thị QR/mã mời một lần; owner phải duyệt tên thiết bị trước khi thiết bị đọc được task summary.
+- Browser remote mặc định chỉ đọc. Full diff cần owner cấp riêng theo task và SHA validation. Duyệt review, tạo task, publish PR, truy cập log và API owner không được hỗ trợ từ xa.
 
 ---
 

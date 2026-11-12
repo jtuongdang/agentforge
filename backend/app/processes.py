@@ -129,6 +129,7 @@ async def create_managed_process(*args, **kwargs) -> asyncio.subprocess.Process:
             finally:
                 os.close(read_fd)
             process_group_id = guardian.pid
+            posix_guard.set_process_group_id(process_group_id)
             kwargs["process_group"] = process_group_id
         process = await asyncio.create_subprocess_exec(*args, **kwargs)
         if job:
@@ -157,10 +158,11 @@ async def wait_for_process_exit(process: asyncio.subprocess.Process) -> int:
 
 
 def process_watchdog_main(read_fd: int) -> None:
-    """Wait for the backend's pipe to close, then kill this process group."""
+    """Read the owned PGID, wait for owner pipe close, then kill that group."""
     if os.name != "posix":
         return
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    group_buffer = bytearray()
     try:
         while True:
             try:
@@ -169,16 +171,31 @@ def process_watchdog_main(read_fd: int) -> None:
                 continue
             if not data:
                 break
+            group_buffer.extend(data)
+            if b"\n" in group_buffer:
+                break
+        if b"\n" in group_buffer:
+            raw_group, _, remainder = group_buffer.partition(b"\n")
+            group_id = int(raw_group)
+            if remainder:
+                raise ValueError("Unexpected process watchdog bootstrap data")
+            while True:
+                try:
+                    if not os.read(read_fd, 4096):
+                        break
+                except InterruptedError:
+                    continue
+        else:
+            group_id = os.getpid()
     finally:
         os.close(read_fd)
-    process_group_id = os.getpid()
     try:
-        os.killpg(process_group_id, signal.SIGTERM)
+        os.killpg(group_id, signal.SIGTERM)
     except (ProcessLookupError, PermissionError, OSError):
         return
     time.sleep(0.25)
     try:
-        os.killpg(process_group_id, signal.SIGKILL)
+        os.killpg(group_id, signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
         pass
 
@@ -188,6 +205,15 @@ class _PosixProcessGuard:
 
     def __init__(self, fd: int):
         self.fd = fd
+
+    def set_process_group_id(self, process_group_id: int) -> None:
+        fd = getattr(self, "fd", None)
+        if fd is None:
+            raise RuntimeError("Process guard is already closed")
+        payload = f"{process_group_id}\n".encode("ascii")
+        written = os.write(fd, payload)
+        if written != len(payload):
+            raise OSError("Could not send process group id to watchdog")
 
     def close(self) -> None:
         fd = getattr(self, "fd", None)

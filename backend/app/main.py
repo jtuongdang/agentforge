@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -24,6 +24,7 @@ from . import db
 from . import portability
 from . import providers
 from . import tech_lead
+from . import remote_pairing
 from .engine import get_task, log_event, set_task
 from . import fleet as fleet_manager
 from .git_ops import (changed_paths, check_repository_sync, is_github_remote, list_repository_branches,
@@ -32,6 +33,7 @@ from .git_ops import (changed_paths, check_repository_sync, is_github_remote, li
 from .models import (AgentCreate, CompleteHandoff, ContractCreate, FleetSettingsUpdate, LeadHandshake,
                      LeadPairingCreate, LeadReview, ProjectCheckpointCreate, ProjectCheckpointRestore,
                      ProviderConnectionCreate, ProviderConnectionUpdate,
+                     RemoteDiffGrant, RemotePairingPoll, RemotePairingRequest, RemoteWsTicketRequest,
                      RepositoryCreate, RepositoryPreflight, TaskCreate)
 from .contracts import ContractManager
 from .orchestrator import Orchestrator
@@ -49,6 +51,8 @@ execution_engine = orchestrator.execution
 scheduler = orchestrator.scheduler
 ALLOWED_ORIGINS = {"http://127.0.0.1:5173", "http://localhost:5173", "http://[::1]:5173", "tauri://localhost",
                    "http://tauri.localhost", "https://tauri.localhost"}
+if remote_pairing.remote_boundary_enabled():
+    ALLOWED_ORIGINS.add(os.environ["CLINIC_ORCHESTRATOR_REMOTE_ORIGIN"].strip().rstrip("/"))
 _ws_tickets: dict[str, float] = {}
 
 
@@ -93,6 +97,7 @@ def _host_is_loopback(host: str) -> bool:
 
 def bootstrap() -> None:
     db.init_db()
+    remote_pairing.recover_after_restart()
     registry.refresh()
     reconcile_interrupted_tasks()
 
@@ -166,6 +171,17 @@ app.add_middleware(CORSMiddleware, allow_origins=sorted(ALLOWED_ORIGINS),
 async def require_local_api_token(request, call_next):
     if request.method == "OPTIONS":
         return await call_next(request)
+    if request.url.path.startswith("/remote/api/"):
+        from fastapi.responses import JSONResponse
+        if not remote_pairing.ingress_request_allowed(request):
+            return JSONResponse({"detail": "Remote HTTPS ingress is not configured or request boundary is invalid"}, status_code=403)
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            try:
+                body_size = int(request.headers.get("content-length", "-1"))
+            except ValueError:
+                body_size = -1
+            if body_size < 0 or body_size > remote_pairing.MAX_REMOTE_BODY_BYTES:
+                return JSONResponse({"detail": "Remote request body is missing a valid bounded Content-Length"}, status_code=413)
     if request.url.path.startswith("/api/") and request.url.path not in {"/api/session"}:
         if not _host_is_loopback(request.headers.get("host", "")):
             from fastapi.responses import JSONResponse
@@ -211,6 +227,208 @@ def _lead_client_session(request: Request, scope: str | None = None) -> dict:
     if session is None:
         raise HTTPException(403, "Tech Lead session does not hold the required scope or lease")
     return session
+
+
+def _remote_device(request: Request) -> dict:
+    supplied = request.headers.get("authorization", "")
+    if not supplied.startswith("Bearer "):
+        raise HTTPException(401, "Remote device session required")
+    device = remote_pairing.authorize(supplied.removeprefix("Bearer "))
+    if device is None:
+        raise HTTPException(401, "Remote device session expired or revoked")
+    if not remote_pairing.consume_rest_budget(device["id"]):
+        raise HTTPException(429, "Remote device request limit reached; wait one minute and retry")
+    return device
+
+
+@app.post("/api/remote/invites", status_code=201)
+def create_remote_invite():
+    if not remote_pairing.remote_boundary_enabled():
+        raise HTTPException(409, "Configure an HTTPS VPN ingress and trusted proxy before creating remote invitations")
+    return remote_pairing.create_invite()
+
+
+@app.get("/api/remote/status")
+def remote_pairing_status():
+    return {"enabled": remote_pairing.remote_boundary_enabled(),
+            "origin": os.getenv("CLINIC_ORCHESTRATOR_REMOTE_ORIGIN", "").strip().rstrip("/") or None,
+            "gateway": (f"127.0.0.1:{os.getenv('CLINIC_ORCHESTRATOR_REMOTE_GATEWAY_PORT', '8766')}"
+                        if remote_pairing.remote_boundary_enabled() else None),
+            "transport": "VPN + HTTPS ingress",
+            "devices": remote_pairing.list_devices(), "pending_requests": remote_pairing.pending_requests()}
+
+
+@app.get("/api/remote/pairings")
+def remote_pairing_requests():
+    return remote_pairing.pending_requests()
+
+
+@app.post("/api/remote/pairings/{request_id}/approve")
+def approve_remote_pairing(request_id: str):
+    try:
+        return remote_pairing.approve_request(request_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/remote/pairings/{request_id}/deny")
+def deny_remote_pairing(request_id: str):
+    if not remote_pairing.deny_request(request_id):
+        raise HTTPException(404, "Pending remote pairing request not found")
+    return {"id": request_id, "state": "denied"}
+
+
+@app.get("/api/remote/devices")
+def remote_devices():
+    return remote_pairing.list_devices()
+
+
+@app.post("/api/remote/devices/{device_id}/revoke")
+def revoke_remote_device(device_id: str):
+    if not remote_pairing.revoke_device(device_id):
+        raise HTTPException(404, "Active remote device not found")
+    return {"device_id": device_id, "state": "revoked"}
+
+
+@app.post("/api/remote/devices/{device_id}/tasks/{task_id}/diff-grant")
+def grant_remote_task_diff(device_id: str, task_id: str, body: RemoteDiffGrant):
+    task = task_row(task_id)
+    validated_sha = str(task.get("validation", {}).get("commit") or "").lower()
+    expected = f"GRANT FULL DIFF {task_id[:8]} {validated_sha[:12]}"
+    if not validated_sha or body.revision_sha.lower() != validated_sha:
+        raise HTTPException(409, "Grant revision must exactly match the task's current validated revision")
+    if not hmac.compare_digest(body.confirmation, expected):
+        raise HTTPException(422, f"To grant, enter: {expected}")
+    try:
+        return remote_pairing.grant_full_diff(device_id, task_id, validated_sha)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.delete("/api/remote/devices/{device_id}/tasks/{task_id}/diff-grant")
+def revoke_remote_task_diff(device_id: str, task_id: str):
+    if not remote_pairing.revoke_diff_grant(device_id, task_id):
+        raise HTTPException(404, "Active task diff grant not found")
+    return {"device_id": device_id, "task_id": task_id, "state": "revoked"}
+
+
+def _require_remote_ingress(request: Request) -> None:
+    if not remote_pairing.ingress_request_allowed(request):
+        raise HTTPException(403, "Remote HTTPS ingress is not configured or request boundary is invalid")
+
+
+@app.post("/remote/api/pairings", status_code=202)
+def remote_request_pairing(body: RemotePairingRequest, request: Request):
+    _require_remote_ingress(request)
+    try:
+        return remote_pairing.request_pairing(body.pairing_code, body.client_id, body.client_name)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/remote/api/pairings/{request_id}/poll")
+def remote_poll_pairing(request_id: str, body: RemotePairingPoll, request: Request):
+    _require_remote_ingress(request)
+    try:
+        return remote_pairing.poll_pairing(request_id, body.poll_secret)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.post("/remote/api/pairings/{request_id}/cancel")
+def remote_cancel_pairing(request_id: str, body: RemotePairingPoll, request: Request):
+    _require_remote_ingress(request)
+    if not remote_pairing.cancel_pairing_request(request_id, body.poll_secret):
+        raise HTTPException(404, "Pending pairing request not found")
+    return {"request_id": request_id, "state": "cancelled"}
+
+
+@app.get("/remote/api/tasks")
+def remote_task_summaries(request: Request):
+    device = _remote_device(request)
+    with db.connect() as con:
+        rows = con.execute("""SELECT t.id,t.title,t.status,t.priority,t.created_at,t.updated_at,
+                r.name AS repository_name,t.validation
+            FROM tasks t JOIN repositories r ON r.id=t.repository_id
+            ORDER BY t.updated_at DESC,t.id LIMIT 50""").fetchall()
+    result = []
+    for row in rows:
+        try:
+            validation = json.loads(row["validation"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            validation = {}
+        revision = str(validation.get("commit") or "").lower()
+        result.append({"id": row["id"], "title": remote_pairing.safe_label(row["title"]), "status": row["status"],
+            "priority": row["priority"], "created_at": row["created_at"], "updated_at": row["updated_at"],
+            "repository_name": remote_pairing.safe_label(row["repository_name"]), "validation_passed": bool(validation.get("passed")),
+            "full_diff_available": bool(revision and remote_pairing.diff_grant(device["id"], row["id"], revision))})
+    return {"device": {"id": device["id"], "name": device["client_name"], "expires_at": device["expires_at"]},
+            "tasks": result, "read_only": True}
+
+
+@app.get("/remote/api/tasks/{task_id}/diff")
+def remote_task_diff(task_id: str, request: Request, offset: int = Query(default=0, ge=0, le=1_000_000),
+                     limit: int = Query(default=24000, ge=1, le=24000)):
+    device = _remote_device(request)
+    task = task_row(task_id)
+    revision = str(task.get("validation", {}).get("commit") or "").lower()
+    if not revision or not remote_pairing.diff_grant(device["id"], task_id, revision):
+        raise HTTPException(403, "This device does not have a current task-specific full diff grant")
+    preview = task_diff_preview(task_id, offset, limit)
+    return {"task_id": task_id, "revision_sha": revision, "diff": preview.get("diff", ""),
+            "offset": offset, "limit": limit, "next_offset": preview.get("next_offset"),
+            "truncated": bool(preview.get("truncated", False))}
+
+
+@app.post("/remote/api/ws-ticket", status_code=204)
+def remote_ws_ticket(body: RemoteWsTicketRequest, request: Request, response: Response):
+    device = _remote_device(request)
+    try:
+        ticket = remote_pairing.issue_ws_ticket(device["id"], body.task_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (PermissionError, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    response.set_cookie("__Host-devagent-remote-ws", ticket, max_age=30, secure=True,
+                        httponly=True, samesite="strict", path="/")
+
+
+@app.websocket("/remote/ws/tasks/{task_id}/events")
+async def remote_stream_events(socket: WebSocket, task_id: str):
+    if not remote_pairing.ingress_request_allowed(socket):
+        await socket.close(code=4403)
+        return
+    device_id = remote_pairing.consume_ws_ticket(socket.cookies.get("__Host-devagent-remote-ws", ""), task_id)
+    if device_id is None or not remote_pairing.device_is_active(device_id):
+        await socket.close(code=4401)
+        return
+    if not remote_pairing.open_ws(device_id):
+        await socket.close(code=4429)
+        return
+    try:
+        task = task_row(task_id)
+        await socket.accept()
+        last_updated = ""
+        while True:
+            if not remote_pairing.device_is_active(device_id):
+                await socket.close(code=4401)
+                return
+            current = task_row(task_id)
+            if current["updated_at"] != last_updated:
+                await socket.send_json({"task_id": task_id, "status": current["status"],
+                                        "updated_at": current["updated_at"]})
+                last_updated = current["updated_at"]
+            await asyncio.sleep(2)
+    except HTTPException:
+        await socket.close(code=4404)
+    except WebSocketDisconnect:
+        return
+    finally:
+        remote_pairing.close_ws(device_id)
 
 
 @app.get("/api/lead/contract")

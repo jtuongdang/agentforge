@@ -60,7 +60,7 @@ def backup_before_migration() -> Path | None:
     with sqlite3.connect(DB_PATH, timeout=20) as source:
         version = source.execute("PRAGMA user_version").fetchone()[0]
         tables = source.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
-        if version >= 7 or tables == 0:
+        if version >= 8 or tables == 0:
             return None
         backup_dir = DB_PATH.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -136,6 +136,28 @@ def init_db() -> None:
             session_id TEXT NOT NULL REFERENCES lead_sessions(id), decision TEXT NOT NULL,
             comments TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS remote_invites (
+            id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, state TEXT NOT NULL DEFAULT 'issued'
+                CHECK(state IN ('issued','requested','consumed','revoked','expired')),
+            created_at TEXT NOT NULL, expires_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS remote_pairing_requests (
+            id TEXT PRIMARY KEY, invite_id TEXT NOT NULL REFERENCES remote_invites(id),
+            poll_hash TEXT NOT NULL UNIQUE, client_id TEXT NOT NULL, client_name TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','approved','denied','delivered','expired')),
+            created_at TEXT NOT NULL, expires_at TEXT NOT NULL, device_id TEXT
+        );
+        CREATE TABLE IF NOT EXISTS remote_devices (
+            id TEXT PRIMARY KEY, client_id TEXT NOT NULL, client_name TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE, state TEXT NOT NULL DEFAULT 'active'
+                CHECK(state IN ('active','revoked','expired')),
+            created_at TEXT NOT NULL, last_seen TEXT NOT NULL, expires_at TEXT NOT NULL, revoked_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS remote_task_diff_grants (
+            device_id TEXT NOT NULL REFERENCES remote_devices(id), task_id TEXT NOT NULL REFERENCES tasks(id),
+            revision_sha TEXT NOT NULL, granted_at TEXT NOT NULL, revoked_at TEXT,
+            PRIMARY KEY(device_id,task_id)
+        );
         CREATE TABLE IF NOT EXISTS task_writer_leases (
             task_id TEXT PRIMARY KEY REFERENCES tasks(id), lease_id TEXT NOT NULL UNIQUE,
             run_id TEXT NOT NULL, agent_id TEXT NOT NULL REFERENCES agents(id),
@@ -187,7 +209,7 @@ def init_db() -> None:
         for name, declaration in migrations.items():
             if name not in columns:
                 con.execute(f"ALTER TABLE agents ADD COLUMN {name} {declaration}")
-        con.execute("PRAGMA user_version=7")
+        con.execute("PRAGMA user_version=8")
 
 
 def event(task_id: str | None, kind: str, message: str, details: Any = None, agent_id: str | None = None) -> None:

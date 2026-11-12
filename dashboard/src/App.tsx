@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
+import { QRCodeSVG } from 'qrcode.react'
 import './App.css'
 import './Fleet.css'
 
@@ -39,7 +40,7 @@ type RepoBranch = { name: string; local: boolean; remote: boolean }
 type Task = { id: string; title: string; objective: string; acceptance_criteria: string[]; priority: string; status: string; repository_id: string; repository_name: string; repository_remote?: string | null; repository_default_branch?: string; base_branch?: string; repository_validation_profile?: string; repository_validation_command?: string[]; agent_name?: string; assigned_agent_id?: string; preferred_agent_id?: string; writer_lease_state?: 'active'|'orphaned'|null; writer_lease_run_id?: string | null; writer_lease_agent_id?: string | null; file_globs: string[]; required_capabilities: string[]; dependencies: string[]; contract_id?: string; branch?: string; worktree?: string; retries: number; max_retries: number; validation: Record<string, unknown>; error?: string; pr_url?: string; created_at: string }
 type Contract = { id: string; title: string; body: string; state: string; version: number }
 type EventRow = { id: number; kind: string; message: string; created_at: string; details: Record<string, unknown> }
-type Nav = 'Overview' | 'Tasks' | 'Agents' | 'Contracts' | 'History' | 'Storage' | 'Fleet'
+type Nav = 'Overview' | 'Tasks' | 'Agents' | 'Contracts' | 'History' | 'Storage' | 'Fleet' | 'Remote'
 type StorageMetrics = { measured_at: string; data_bytes: number; categories: Record<string, number>; database_files: Record<string, number>; sqlite_logical_bytes: number; sqlite_unused_bytes: number; disk: { total_bytes: number; free_bytes: number; used_percent: number }; counts: { repositories: number; agents: number; tasks: number; runs: number; events: number; active_tasks: number } }
 type CheckpointWorktree = { task_id: string; available: boolean; dirty_paths: string[]; secret_paths?: string[]; secret_scan_incomplete_paths?: string[]; scan_error?: string }
 type CheckpointRepository = { id: string; name: string; default_branch: string; remote: string | null; available: boolean; dirty_paths: string[]; secret_paths?: string[]; secret_scan_incomplete_paths?: string[]; scan_error?: string; worktrees: CheckpointWorktree[] }
@@ -50,6 +51,10 @@ type FleetSnapshot = { settings: FleetSettings; active_runs: { task_id: string; 
 type LeadStatus = { connected: boolean; session: { session_id: string; client_id: string; client_name: string; scopes: string[]; lease_expires_at: string; session_expires_at: string } | null }
 type LeadPairing = { pairing_code: string; expires_at: string; contract_version: number; scopes: string[] }
 type LeadContract = { version: number; lease_ttl_seconds: number; session_ttl_seconds: number; client_endpoints: Record<string,string>; publication: string }
+type RemoteDevice = { id:string; client_id:string; client_name:string; state:string; created_at:string; last_seen:string; expires_at:string; diff_grants?:{task_id:string;revision_sha:string;granted_at:string}[] }
+type RemoteRequest = { id:string; client_id:string; client_name:string; created_at:string; expires_at:string; state:string }
+type RemoteStatus = { enabled:boolean; origin:string|null; gateway:string|null; transport:string; devices:RemoteDevice[]; pending_requests:RemoteRequest[] }
+type RemoteInvite = { invite_id:string; pairing_code:string; expires_at:string; scopes:string[]; transport:string }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const token = await getApiToken()
@@ -116,6 +121,9 @@ function App() {
   const [leadPairing, setLeadPairing] = useState<LeadPairing|null>(null)
   const [leadPrompt, setLeadPrompt] = useState('')
   const [leadBusy, setLeadBusy] = useState(false)
+  const [remoteStatus, setRemoteStatus] = useState<RemoteStatus|null>(null)
+  const [remoteInvite, setRemoteInvite] = useState<RemoteInvite|null>(null)
+  const [remoteBusy, setRemoteBusy] = useState(false)
   const [busyAgentId, setBusyAgentId] = useState<string | null>(null)
   const [taskRepositoryId, setTaskRepositoryId] = useState('')
   const [taskAgentId, setTaskAgentId] = useState('')
@@ -134,10 +142,10 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [a, r, t, c, h, f, lead] = await Promise.all([
-        api<Agent[]>('/agents'), api<Repo[]>('/repositories'), api<Task[]>('/tasks'), api<Contract[]>('/contracts'), api<{ok:boolean}>('/health'), api<FleetSnapshot>('/fleet'), api<LeadStatus>('/lead/status'),
+      const [a, r, t, c, h, f, lead, remote] = await Promise.all([
+        api<Agent[]>('/agents'), api<Repo[]>('/repositories'), api<Task[]>('/tasks'), api<Contract[]>('/contracts'), api<{ok:boolean}>('/health'), api<FleetSnapshot>('/fleet'), api<LeadStatus>('/lead/status'), api<RemoteStatus>('/remote/status'),
       ])
-      setAgents(a); setRepos(r); setTasks(t); setContracts(c); setHealth(h); setFleet(f); setLeadStatus(lead)
+      setAgents(a); setRepos(r); setTasks(t); setContracts(c); setHealth(h); setFleet(f); setLeadStatus(lead); setRemoteStatus(remote)
       if (lead.connected) { setLeadPairing(null); setLeadPrompt('') }
       setSelected(current => current ? t.find(task => task.id === current.id) ?? current : null)
       setError('')
@@ -310,6 +318,43 @@ function App() {
     finally { setLeadBusy(false) }
   }
 
+  const createRemoteInvite = async () => {
+    setRemoteBusy(true)
+    try { setRemoteInvite(await api<RemoteInvite>('/remote/invites', { method:'POST' })); setError('') }
+    catch(e) { setError(e instanceof Error ? e.message : 'Could not create remote invitation') }
+    finally { setRemoteBusy(false) }
+  }
+  const reviewRemoteRequest = async (id:string, decision:'approve'|'deny') => {
+    setRemoteBusy(true)
+    try { await api(`/remote/pairings/${encodeURIComponent(id)}/${decision}`, { method:'POST' }); await refresh() }
+    catch(e) { setError(e instanceof Error ? e.message : 'Could not update remote pairing') }
+    finally { setRemoteBusy(false) }
+  }
+  const revokeRemoteDevice = async (device:RemoteDevice) => {
+    if (!window.confirm(`Revoke ${device.client_name}? Its remote REST and WebSocket sessions will stop.`)) return
+    setRemoteBusy(true)
+    try { await api(`/remote/devices/${encodeURIComponent(device.id)}/revoke`, { method:'POST' }); await refresh() }
+    catch(e) { setError(e instanceof Error ? e.message : 'Could not revoke remote device') }
+    finally { setRemoteBusy(false) }
+  }
+  const grantRemoteDiff = async (device:RemoteDevice, task:Task) => {
+    const revision = typeof task.validation?.commit === 'string' ? task.validation.commit : ''
+    if (!revision) return
+    const phrase = `GRANT FULL DIFF ${task.id.slice(0,8)} ${revision.slice(0,12)}`
+    const confirmation = window.prompt(`Grant ${device.client_name} full diff access for task ${task.id.slice(0,8)} at validated revision ${revision.slice(0,12)}?\n\nType exactly: ${phrase}`)
+    if (confirmation !== phrase) return
+    setRemoteBusy(true)
+    try { await api(`/remote/devices/${encodeURIComponent(device.id)}/tasks/${encodeURIComponent(task.id)}/diff-grant`, { method:'POST', body:JSON.stringify({revision_sha:revision,confirmation}) }); await refresh() }
+    catch(e) { setError(e instanceof Error ? e.message : 'Could not grant task diff access') }
+    finally { setRemoteBusy(false) }
+  }
+  const revokeRemoteDiff = async (device:RemoteDevice, task:Task) => {
+    setRemoteBusy(true)
+    try { await api(`/remote/devices/${encodeURIComponent(device.id)}/tasks/${encodeURIComponent(task.id)}/diff-grant`, { method:'DELETE' }); await refresh() }
+    catch(e) { setError(e instanceof Error ? e.message : 'Could not revoke task diff access') }
+    finally { setRemoteBusy(false) }
+  }
+
   const removeAgent = async (agent: Agent) => {
     if (!window.confirm(`Gỡ ${agent.name} khỏi lịch phân công? Lịch sử được giữ lại; CLI và đăng nhập trên máy không bị gỡ.`)) return
     setBusyAgentId(agent.id)
@@ -348,7 +393,7 @@ function App() {
       <div className="brand"><div className="brand-mark">D</div><div><strong>DevAgent Orchestrator</strong><small>Multi-agent engineering</small></div></div>
       <div className="workspace"><span className="pulse"/><div><small>WORKSPACE</small><strong>Registered projects</strong></div><span className="chevron">⌄</span></div>
       <div className="nav-label">WORKSPACE</div>
-      <nav>{(['Overview', 'Tasks', 'Agents', 'Contracts', 'History', 'Storage', 'Fleet'] as Nav[]).map((item, i) => <button key={item} className={nav === item ? 'nav-item active' : 'nav-item'} onClick={() => setNav(item)}><span className="nav-icon">{['◫', '☷', '◇', '⌘', '◷', '▤', '▥'][i]}</span>{item}{item === 'Tasks' && tasks.length > 0 && <span className="nav-count">{tasks.length}</span>}</button>)}</nav>
+      <nav>{(['Overview', 'Tasks', 'Agents', 'Contracts', 'History', 'Storage', 'Fleet', 'Remote'] as Nav[]).map((item, i) => <button key={item} className={nav === item ? 'nav-item active' : 'nav-item'} onClick={() => setNav(item)}><span className="nav-icon">{['◫', '☷', '◇', '⌘', '◷', '▤', '▥','⇄'][i]}</span>{item}{item === 'Tasks' && tasks.length > 0 && <span className="nav-count">{tasks.length}</span>}</button>)}</nav>
       <div className="sidebar-bottom"><div className="connection"><span className={health?.ok ? 'status-dot online' : 'status-dot'}/><span>{health?.ok ? 'Local engine connected' : 'Connecting to API…'}</span></div><small>v0.1.0 · localhost only</small></div>
     </aside>
     <main className="main">
@@ -378,6 +423,7 @@ function App() {
         {nav === 'History' && <History tasks={tasks.filter(t => ['draft_pr', 'completed', 'failed', 'blocked', 'cancelled'].includes(t.status))} onSelect={setSelected}/>}
         {nav === 'Storage' && <StoragePage metrics={storage} error={storageError} busy={storageBusy} onRefresh={() => void refreshStorage()}/>}
         {nav === 'Fleet' && <FleetPage fleet={fleet} busy={fleetBusy} onSave={saveFleetSettings} leadStatus={leadStatus} pairing={leadPairing} prompt={leadPrompt} leadBusy={leadBusy} onCreatePairing={createLeadPairing} onRevokeLead={revokeLead}/>}
+        {nav === 'Remote' && <RemotePage status={remoteStatus} invite={remoteInvite} tasks={tasks} busy={remoteBusy} onCreateInvite={createRemoteInvite} onApprove={id=>void reviewRemoteRequest(id,'approve')} onDeny={id=>void reviewRemoteRequest(id,'deny')} onRevoke={device=>void revokeRemoteDevice(device)} onGrant={grantRemoteDiff} onRevokeDiff={revokeRemoteDiff} onDismissInvite={()=>setRemoteInvite(null)}/>}
       </div>
     </main>
     {selected && nav !== 'Tasks' && <TaskDrawer key={selected.id} task={selected} tasks={tasks} events={events} onClose={() => setSelected(null)} onApprove={() => setApproval(selected)} onCompleteLocal={() => void completeLocally(selected)} onCancel={() => void cancel(selected)} onHandoff={() => void handoff(selected)}/>}
@@ -503,7 +549,32 @@ function StoragePage({metrics,error,busy,onRefresh}:{metrics:StorageMetrics|null
     </section>
   </div>
 }
-function pageDescription(nav: Nav) { switch (nav) { case 'Tasks': return 'Plan, assign, validate and review isolated work.'; case 'Agents': return 'Register executors by capability and allowed file scope.'; case 'Contracts': return 'Coordinate shared interfaces before dependent tasks run.'; case 'History': return 'Completed work, blocked runs and Draft PR records.'; case 'Storage': return 'Theo dõi SQLite, worktree và dung lượng ổ đĩa trên máy.'; default: return 'Coordinate independent agents across your registered Git projects.' } }
+function RemotePage({status,invite,tasks,busy,onCreateInvite,onApprove,onDeny,onRevoke,onGrant,onRevokeDiff,onDismissInvite}:{status:RemoteStatus|null;invite:RemoteInvite|null;tasks:Task[];busy:boolean;onCreateInvite:()=>void;onApprove:(id:string)=>void;onDeny:(id:string)=>void;onRevoke:(device:RemoteDevice)=>void;onGrant:(device:RemoteDevice,task:Task)=>void;onRevokeDiff:(device:RemoteDevice,task:Task)=>void;onDismissInvite:()=>void}) {
+  const copyInvite = async () => {
+    if (!invite || !status?.origin) return
+    try { await navigator.clipboard.writeText(`Open ${status.origin}/remote and enter this one-time code:\n${invite.pairing_code}`) }
+    catch { window.prompt('Copy this one-time pairing code and send it to the intended device:', invite.pairing_code) }
+  }
+  return <div className="remote-owner-page">
+    <section className="panel remote-owner-panel"><div className="panel-heading"><div><h2>Remote review access</h2><p>Browser client · private VPN + HTTPS ingress · read-only by default. The owner API remains loopback-only.</p></div><span className={`agent-state ${status?.enabled?'available':'disabled'}`}>{status?.enabled?'INGRESS READY':'DISABLED'}</span></div>
+      {status?.enabled ? <><div className="remote-owner-info"><b>Configured origin</b><span>{status.origin}</span><b>Loopback gateway</b><span>{status.gateway}</span><small>Expose only <code>/remote</code>, <code>/remote/api/*</code> and <code>/remote/ws/*</code> through the ingress. Terminate HTTPS, restrict ingress to the private VPN, overwrite Host / X-Forwarded-Proto, preserve WebSocket upgrade, and do not log pairing/session headers. The owner API stays on its separate ephemeral loopback port.</small></div>
+        {!invite ? <button className="button primary" disabled={busy} onClick={onCreateInvite}>Create one-time invite (5 minutes)</button> : <div className="remote-invite"><QRCodeSVG value={`devagent-pair:v1:${invite.pairing_code}`} size={132} level="M" title="One-time remote pairing code"/><div><small>ONE-TIME INVITE · EXPIRES {date(invite.expires_at)}</small><code>{invite.pairing_code}</code><span>Scan or paste this one-time code in the remote browser. Scope: {invite.scopes.join(', ')} · only its SHA-256 hash is stored.</span></div><div className="panel-buttons"><button className="button secondary" onClick={() => void copyInvite()}>Copy remote URL + code</button><button className="button secondary" onClick={onDismissInvite}>Dismiss</button></div></div>}
+      </> : <div className="remote-owner-disabled"><b>Remote routes are disabled.</b><p>Set <code>CLINIC_ORCHESTRATOR_REMOTE_ORIGIN</code> to the exact HTTPS origin and <code>CLINIC_ORCHESTRATOR_REMOTE_PROXY_IPS</code> to the ingress peer IPs before creating an invite. This does not change the local bind address; no remote listener is opened.</p></div>}
+    </section>
+    <section className="panel remote-owner-panel"><div className="panel-heading"><div><h2>Pending device approvals</h2><p>Review the requested device name before issuing its separate read-only credential.</p></div><span className="count-pill">{status?.pending_requests.length || 0}</span></div>
+      {status?.pending_requests.length ? status.pending_requests.map(item=><div className="remote-owner-row" key={item.id}><div><b>{item.client_name}</b><small>{item.client_id} · requested {date(item.created_at)} · expires {date(item.expires_at)}</small><span className="chips"><span>summary:read</span></span></div><div className="panel-buttons"><button className="button secondary" disabled={busy} onClick={()=>onDeny(item.id)}>Deny</button><button className="button primary" disabled={busy} onClick={()=>onApprove(item.id)}>Approve device</button></div></div>) : <Empty title="No pending requests" text="A device appears here after it submits an unexpired invitation code."/>}
+    </section>
+    <section className="panel remote-owner-panel"><div className="panel-heading"><div><h2>Paired devices</h2><p>Revoke a device to deny future REST access and close its live event stream.</p></div><span className="count-pill">{status?.devices.filter(item=>item.state==='active').length || 0} active</span></div>
+      {status?.devices.length ? status.devices.map(device=><div className="remote-owner-device" key={device.id}><div className="remote-owner-row"><div><b>{device.client_name}</b><small>{device.client_id} · last seen {date(device.last_seen)} · expires {date(device.expires_at)}</small><span className={`agent-state ${device.state==='active'?'available':'disabled'}`}>{device.state.toUpperCase()}</span></div>{device.state==='active' && <button className="button danger-outline" disabled={busy} onClick={()=>onRevoke(device)}>Revoke device</button>}</div>
+        {device.state==='active' && <div className="remote-grants"><b>Task-specific full diff grants</b>{tasks.filter(task=>typeof task.validation?.commit==='string' && (task.validation.commit as string).length>=40).map(task=>{
+          const revision=task.validation.commit as string
+          const grant=device.diff_grants?.find(item=>item.task_id===task.id && item.revision_sha===revision)
+          return <div className="remote-grant-row" key={task.id}><span>{task.title}<small>{task.id.slice(0,8)} · validated {revision.slice(0,12)}</small></span>{grant ? <button className="button danger-outline" disabled={busy} onClick={()=>onRevokeDiff(device,task)}>Revoke diff</button> : <button className="button secondary" disabled={busy} onClick={()=>onGrant(device,task)}>Grant full diff</button>}</div>
+        })}</div>}</div>) : <Empty title="No paired devices" text="Approved browser devices will be listed here."/>}
+    </section>
+  </div>
+}
+function pageDescription(nav: Nav) { switch (nav) { case 'Tasks': return 'Plan, assign, validate and review isolated work.'; case 'Agents': return 'Register executors by capability and allowed file scope.'; case 'Contracts': return 'Coordinate shared interfaces before dependent tasks run.'; case 'History': return 'Completed work, blocked runs and Draft PR records.'; case 'Storage': return 'Theo dõi SQLite, worktree và dung lượng ổ đĩa trên máy.'; case 'Remote': return 'Manage VPN browser pairing, device approvals and per-task diff access.'; default: return 'Coordinate independent agents across your registered Git projects.' } }
 function StatCard({label,value,note,icon,tone}:{label:string;value:number;note:string;icon:string;tone:string}) { return <div className="stat-card"><div className={`stat-icon ${tone}`}>{icon}</div><div className="stat-value">{value}</div><div className="stat-label">{label}</div><div className="stat-note">{note}</div></div> }
 function TaskTable({tasks,onSelect,selectedId}:{tasks:Task[];onSelect:(task:Task)=>void;selectedId?:string}) { return tasks.length ? <div className="table-wrap"><table><thead><tr><th>TASK</th><th>STATUS</th><th>AGENT</th><th>REPOSITORY</th><th>UPDATED</th><th/></tr></thead><tbody>{tasks.map(task => <tr key={task.id} className={selectedId === task.id ? 'selected-row' : ''} onClick={() => onSelect(task)}><td><div className="task-name"><span className="task-dot" /><b>{task.title}</b><span className={`priority-label ${task.priority || 'normal'}`}>{task.priority || 'normal'}</span></div><small className="task-id">{task.id.slice(0,8)} · {task.file_globs.join(', ')}</small></td><td><Status status={task.status}/></td><td>{task.agent_name || <span className="muted">Unassigned</span>}</td><td>{task.repository_name}</td><td>{date(task.created_at)}</td><td className="arrow">›</td></tr>)}</tbody></table></div> : <Empty title="Nothing in the queue yet" text="Create a bounded task to start an isolated agent run."/> }
 function Status({status}:{status:string}) { const tone = status === 'draft_pr' || status === 'completed' ? 'success' : status === 'failed' || status === 'blocked' ? 'danger' : status === 'awaiting_pr_approval' || status === 'handoff_ready' || status === 'waiting_for_contract' || status === 'waiting_for_scope' ? 'warning' : 'blue'; return <span className={`badge ${tone}`}><span/> {statusLabel[status] || status}</span> }

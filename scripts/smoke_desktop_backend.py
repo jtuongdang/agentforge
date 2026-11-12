@@ -171,6 +171,9 @@ def main() -> int:
             if not credential_store.get("available"):
                 raise RuntimeError("Packaged sidecar has no approved OS credential store: "
                                    + str(credential_store.get("reason", "unavailable")))
+            remote_status = read_json(base + "/api/remote/status", {"Authorization": f"Bearer {token}"})
+            if remote_status.get("enabled"):
+                raise RuntimeError("Packaged sidecar unexpectedly enabled the remote gateway without ingress configuration")
 
             database = temp / "data" / "orchestrator.sqlite3"
             if not database.is_file():
@@ -178,7 +181,10 @@ def main() -> int:
             with closing(sqlite3.connect(database)) as con:
                 version = con.execute("PRAGMA user_version").fetchone()[0]
                 integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
-            if version < 6 or integrity != "ok":
+                remote_tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                                 if row[0].startswith("remote_")}
+            if version < 8 or integrity != "ok" or not {
+                    "remote_invites", "remote_pairing_requests", "remote_devices", "remote_task_diff_grants"}.issubset(remote_tables):
                 raise RuntimeError(f"Packaged database failed checks: schema={version}, integrity={integrity}")
             headers = {"Authorization": f"Bearer {token}"}
             provider = post_json(base + "/api/providers", {

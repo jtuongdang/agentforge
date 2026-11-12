@@ -273,6 +273,13 @@ def _redact_remote(remote: str | None) -> str | None:
     return urlunsplit((parts.scheme.lower(), host, parts.path, "", ""))
 
 
+def _clear_remote_access(con: sqlite3.Connection) -> None:
+    existing = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    for table in ("remote_task_diff_grants", "remote_devices", "remote_pairing_requests", "remote_invites"):
+        if table in existing:
+            con.execute(f'DELETE FROM "{table}"')
+
+
 def _scrub_snapshot_database(path: Path) -> None:
     with closing(sqlite3.connect(path)) as con:
         con.execute("PRAGMA foreign_keys=ON")
@@ -292,6 +299,7 @@ def _scrub_snapshot_database(path: Path) -> None:
         con.execute("DELETE FROM lead_lease")
         if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lead_sessions'").fetchone():
             con.execute("UPDATE lead_sessions SET state='revoked',revoked_at=COALESCE(revoked_at,CURRENT_TIMESTAMP)")
+        _clear_remote_access(con)
         active_marks = ",".join("?" for _ in ACTIVE_STATUSES)
         con.execute(f"UPDATE tasks SET status='blocked',worktree=NULL,finished_at=CURRENT_TIMESTAMP,"
                     f"updated_at=CURRENT_TIMESTAMP,error='Restored checkpoint: inspect the worktree and reconcile before retry.' "
@@ -830,6 +838,7 @@ def restore_checkpoint(path: Path, destination: Path) -> dict:
             con.execute("UPDATE task_writer_leases SET state='orphaned',updated_at=CURRENT_TIMESTAMP WHERE state='active'")
             con.execute("DELETE FROM lead_lease")
             con.execute("UPDATE lead_sessions SET state='revoked',revoked_at=COALESCE(revoked_at,CURRENT_TIMESTAMP)")
+            _clear_remote_access(con)
             con.execute("UPDATE agents SET command='[]',enabled=0,available=0,"
                         "availability_note='Reconfigure the executable and credentials after restore.'")
             if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_connections'").fetchone():

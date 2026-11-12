@@ -158,6 +158,25 @@ class LeadPairingCreate(BaseModel):
     scopes: list[str] = Field(default_factory=lambda: ["handover:read"])
 
 
+class RemotePairingRequest(BaseModel):
+    pairing_code: str = Field(min_length=1, max_length=256)
+    client_id: str = Field(min_length=1, max_length=160)
+    client_name: str = Field(min_length=1, max_length=120)
+
+
+class RemotePairingPoll(BaseModel):
+    poll_secret: str = Field(min_length=1, max_length=256)
+
+
+class RemoteWsTicketRequest(BaseModel):
+    task_id: str = Field(min_length=1, max_length=160)
+
+
+class RemoteDiffGrant(BaseModel):
+    revision_sha: str = Field(min_length=40, max_length=64)
+    confirmation: str = Field(min_length=1, max_length=120)
+
+
 class LeadHandshake(BaseModel):
     pairing_code: str = Field(min_length=20, max_length=128)
     client_id: str = Field(min_length=1, max_length=160)

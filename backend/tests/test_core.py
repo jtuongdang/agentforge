@@ -473,7 +473,7 @@ def test_db_schema_migration_is_versioned_and_backed_up(tmp_path, monkeypatch):
     db.init_db()
 
     with db.connect() as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 8
         assert "base_sha" in {row[1] for row in con.execute("PRAGMA table_info(tasks)")}
     backups = list((tmp_path / "backups").glob("pre-migration-v0-*.sqlite3"))
     assert len(backups) == 1
@@ -902,7 +902,7 @@ def test_provider_schema_upgrade_snapshots_version_five_database(tmp_path, monke
         assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
                            "AND name='provider_connections'").fetchone()[0] == 0
     with db.connect() as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 8
         assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
                            "AND name='provider_connections'").fetchone()[0] == 1
 
@@ -2471,5 +2471,242 @@ def test_checkpoint_restore_api_creates_side_by_side_profile(tmp_path, monkeypat
     result = response.json()
     assert result["repository_count"] == 1
     assert (Path(result["path"]) / "data" / "orchestrator.sqlite3").is_file()
+
+
+def test_remote_viewer_pairing_is_owner_approved_one_time_and_revocable(tmp_path, monkeypatch):
+    from app import remote_pairing
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "remote.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    invite = remote_pairing.create_invite()
+    request = remote_pairing.request_pairing(invite["pairing_code"], "device-fixture", "Review Laptop")
+    assert request["state"] == "pending"
+    with db.connect() as con:
+        assert con.execute("SELECT token_hash FROM remote_invites WHERE id=?", (invite["invite_id"],)).fetchone()[0] != invite["pairing_code"]
+        assert con.execute("SELECT poll_hash FROM remote_pairing_requests WHERE id=?", (request["request_id"],)).fetchone()[0] != request["poll_secret"]
+    with pytest.raises(PermissionError):
+        remote_pairing.request_pairing(invite["pairing_code"], "device-other", "Other device")
+
+    device = remote_pairing.approve_request(request["request_id"])
+    assert device["scopes"] == ["summary:read"]
+    delivered = remote_pairing.poll_pairing(request["request_id"], request["poll_secret"])
+    assert delivered["state"] == "approved"
+    token = delivered["access_token"]
+    assert remote_pairing.authorize(token)["id"] == device["device_id"]
+    assert remote_pairing.poll_pairing(request["request_id"], request["poll_secret"])["state"] == "expired"
+    with db.connect() as con:
+        assert con.execute("SELECT token_hash FROM remote_devices WHERE id=?", (device["device_id"],)).fetchone()[0] != token
+
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('r','Fixture Clinic',?)", (str(tmp_path),))
+        con.execute("""INSERT INTO tasks(id,title,objective,repository_id,file_globs,validation)
+            VALUES('task-remote','Safe title','secret prompt and /Users/private/repo','r','[\"**/*\"]',?)""",
+            (db.dumps({"passed": True}),))
+    grant = remote_pairing.grant_full_diff(device["device_id"], "task-remote", "a" * 40)
+    assert remote_pairing.diff_grant(device["device_id"], "task-remote", "a" * 40)
+    assert not remote_pairing.diff_grant(device["device_id"], "task-remote", "b" * 40)
+    assert remote_pairing.revoke_diff_grant(grant["device_id"], grant["task_id"])
+    assert not remote_pairing.diff_grant(device["device_id"], "task-remote", "a" * 40)
+    assert remote_pairing.revoke_device(device["device_id"])
+    assert remote_pairing.authorize(token) is None
+
+
+def test_remote_pairing_delivery_expires_and_revokes_undelivered_device(tmp_path, monkeypatch):
+    from app import remote_pairing
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "remote-delivery.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    invite = remote_pairing.create_invite()
+    pairing = remote_pairing.request_pairing(invite["pairing_code"], "expiry-fixture", "Expiry Device")
+    device = remote_pairing.approve_request(pairing["request_id"])
+    approval_time = remote_pairing.time.monotonic()
+    monkeypatch.setattr(remote_pairing.time, "monotonic", lambda: approval_time + remote_pairing.DELIVERY_TTL_SECONDS + 1)
+
+    assert remote_pairing.poll_pairing(pairing["request_id"], pairing["poll_secret"]) == {"state": "expired"}
+    assert remote_pairing.device_is_active(device["device_id"]) is False
+
+
+def test_remote_request_resource_budgets_are_bounded_and_released():
+    from app import remote_pairing
+
+    remote_pairing._rest_windows.clear()
+    remote_pairing._ws_connections.clear()
+    for _ in range(120):
+        assert remote_pairing.consume_rest_budget("budget-fixture") is True
+    assert remote_pairing.consume_rest_budget("budget-fixture") is False
+
+    assert remote_pairing.open_ws("connection-fixture") is True
+    assert remote_pairing.open_ws("connection-fixture") is True
+    assert remote_pairing.open_ws("connection-fixture") is False
+    remote_pairing.close_ws("connection-fixture")
+    assert remote_pairing.open_ws("connection-fixture") is True
+    for _ in range(2):
+        remote_pairing.close_ws("connection-fixture")
+    assert remote_pairing._ws_connections == {}
+
+
+def test_remote_ingress_requires_exact_https_origin_and_trusted_proxy(monkeypatch):
+    from starlette.requests import Request
+    from app import remote_pairing
+
+    monkeypatch.delenv("CLINIC_ORCHESTRATOR_REMOTE_ORIGIN", raising=False)
+    monkeypatch.delenv("CLINIC_ORCHESTRATOR_REMOTE_PROXY_IPS", raising=False)
+    assert remote_pairing.remote_boundary_enabled() is False
+    monkeypatch.setenv("CLINIC_ORCHESTRATOR_REMOTE_ORIGIN", "https://review.example.invalid")
+    monkeypatch.setenv("CLINIC_ORCHESTRATOR_REMOTE_PROXY_IPS", "127.0.0.1")
+    assert remote_pairing.remote_boundary_enabled() is True
+
+    def request(headers, peer="127.0.0.1", method="POST"):
+        return Request({"type":"http", "asgi":{"version":"3.0"}, "http_version":"1.1",
+            "method":method, "scheme":"http", "path":"/remote/api/pairings", "raw_path":b"/remote/api/pairings",
+            "query_string":b"", "headers":[(key.lower().encode(), value.encode()) for key,value in headers.items()],
+            "client":(peer,8765), "server":("127.0.0.1",8766)})
+
+    valid = {"host":"review.example.invalid", "origin":"https://review.example.invalid", "x-forwarded-proto":"https"}
+    assert remote_pairing.ingress_request_allowed(request(valid)) is True
+    assert remote_pairing.ingress_request_allowed(request(valid | {"host":"attacker.example.invalid"})) is False
+    assert remote_pairing.ingress_request_allowed(request(valid | {"origin":"https://attacker.example.invalid"})) is False
+    assert remote_pairing.ingress_request_allowed(request(valid | {"x-forwarded-proto":"http"})) is False
+    assert remote_pairing.ingress_request_allowed(request(valid, peer="10.0.0.8")) is False
+    same_origin_get = {"host":"review.example.invalid", "sec-fetch-site":"same-origin", "x-forwarded-proto":"https"}
+    assert remote_pairing.ingress_request_allowed(request(same_origin_get, method="GET")) is True
+    assert remote_pairing.ingress_request_allowed(request({"host":"review.example.invalid", "x-forwarded-proto":"https"}, method="GET")) is False
+
+
+def test_remote_api_has_separate_auth_and_redacted_read_only_payload(tmp_path, monkeypatch):
+    from app import main as main_module
+    from app import remote_pairing
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "remote-api.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    monkeypatch.setenv("CLINIC_ORCHESTRATOR_REMOTE_ORIGIN", "https://review.example.invalid")
+    monkeypatch.setenv("CLINIC_ORCHESTRATOR_REMOTE_PROXY_IPS", "127.0.0.1")
+    monkeypatch.setattr(remote_pairing, "ingress_request_allowed", lambda _request: True)
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('r','Fixture Clinic',?)", (str(tmp_path),))
+        con.execute("""INSERT INTO tasks(id,title,objective,repository_id,file_globs,validation)
+            VALUES('task-remote','Safe title','private prompt /Users/private/repo','r','[\"**/*\"]',?)""",
+            (db.dumps({"passed": True, "commit": "a" * 40, "worktree": "/secret/path"}),))
+    monkeypatch.setattr(main_module, "task_row", lambda task_id: {
+        "id": task_id, "status": "awaiting_pr_approval", "updated_at": "fixture-time",
+        "validation": {"passed": True, "scope_passed": True, "commit": "a" * 40}})
+    monkeypatch.setattr(main_module, "task_diff_preview", lambda task_id, offset, limit: {
+        "diff": "diff --git a/fixture b/fixture\n+reviewable\n", "truncated": False, "next_offset": None})
+
+    headers = {"Origin": "https://review.example.invalid", "Host": "review.example.invalid",
+               "X-Forwarded-Proto": "https"}
+    with authenticated_test_client(monkeypatch) as owner:
+        oversized = owner.post("/remote/api/pairings", content=b"x" * (remote_pairing.MAX_REMOTE_BODY_BYTES + 1),
+                               headers=headers | {"Content-Type": "application/json"})
+        assert oversized.status_code == 413
+        invite_response = owner.post("/api/remote/invites")
+        assert invite_response.status_code == 201
+        invite = invite_response.json()
+        remote = TestClient(app, headers=headers)
+        request_response = remote.post("/remote/api/pairings", json={
+            "pairing_code": invite["pairing_code"], "client_id": "browser-fixture", "client_name": "Browser Device"})
+        assert request_response.status_code == 202
+        request = request_response.json()
+        pending = owner.get("/api/remote/pairings").json()
+        assert [entry["id"] for entry in pending] == [request["request_id"]]
+        approved = owner.post(f"/api/remote/pairings/{request['request_id']}/approve")
+        assert approved.status_code == 200
+        session = remote.post(f"/remote/api/pairings/{request['request_id']}/poll",
+                              json={"poll_secret": request["poll_secret"]}).json()
+        remote_headers = headers | {"Authorization": f"Bearer {session['access_token']}"}
+        summaries = remote.get("/remote/api/tasks", headers=remote_headers)
+        assert summaries.status_code == 200
+        assert summaries.json()["read_only"] is True
+        body = summaries.text
+        assert "Safe title" in body and "Fixture Clinic" in body
+        assert "private prompt" not in body and "/Users/private/repo" not in body and "/secret/path" not in body
+        assert remote.get("/remote/api/tasks/task-remote/diff", headers=remote_headers).status_code == 403
+        bad_grant = owner.post(f"/api/remote/devices/{approved.json()['device_id']}/tasks/task-remote/diff-grant",
+            json={"revision_sha":"b"*40,"confirmation":f"GRANT FULL DIFF task-rem {'b'*12}"})
+        assert bad_grant.status_code == 409
+        phrase = f"GRANT FULL DIFF task-rem {'a'*12}"
+        grant = owner.post(f"/api/remote/devices/{approved.json()['device_id']}/tasks/task-remote/diff-grant",
+            json={"revision_sha":"a"*40,"confirmation":phrase})
+        assert grant.status_code == 200
+        diff = remote.get("/remote/api/tasks/task-remote/diff", headers=remote_headers)
+        assert diff.status_code == 200 and "+reviewable" in diff.json()["diff"]
+        assert diff.json()["revision_sha"] == "a"*40
+        assert remote.get("/remote/api/tasks/task-remote/diff?limit=24001", headers=remote_headers).status_code == 422
+        assert remote.get("/remote/api/tasks/task-remote/diff?offset=1000001", headers=remote_headers).status_code == 422
+        revoked_grant = owner.delete(f"/api/remote/devices/{approved.json()['device_id']}/tasks/task-remote/diff-grant")
+        assert revoked_grant.status_code == 200
+        assert remote.get("/remote/api/tasks/task-remote/diff", headers=remote_headers).status_code == 403
+        assert remote.get("/api/fleet", headers=remote_headers).status_code == 403
+        assert remote.get("/remote/api/tasks").status_code == 401
+        ticket = remote.post("/remote/api/ws-ticket", headers=remote_headers, json={"task_id":"task-remote"})
+        assert ticket.status_code == 204 and "__Host-devagent-remote-ws=" in ticket.headers["set-cookie"]
+        cookie = ticket.headers["set-cookie"].split(";", 1)[0]
+        from starlette.websockets import WebSocketDisconnect
+        with remote.websocket_connect("/remote/ws/tasks/task-remote/events", headers=headers | {"Cookie":cookie}) as socket:
+            update = socket.receive_json()
+            assert update == {"task_id":"task-remote", "status":"awaiting_pr_approval", "updated_at":"fixture-time"}
+            revoked = owner.post(f"/api/remote/devices/{approved.json()['device_id']}/revoke")
+            assert revoked.status_code == 200
+            with pytest.raises(WebSocketDisconnect):
+                socket.receive_json()
+        assert remote.get("/remote/api/tasks", headers=remote_headers).status_code == 401
+
+
+def test_remote_sessions_expire_on_restart_and_checkpoint_scrubs_remote_access(tmp_path, monkeypatch):
+    from app import portability, remote_pairing
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "remote-restart.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    invite = remote_pairing.create_invite()
+    pairing = remote_pairing.request_pairing(invite["pairing_code"], "restart-fixture", "Restart Device")
+    device = remote_pairing.approve_request(pairing["request_id"])
+    session = remote_pairing.poll_pairing(pairing["request_id"], pairing["poll_secret"])
+    assert remote_pairing.authorize(session["access_token"])
+
+    remote_pairing.recover_after_restart()
+    assert remote_pairing.authorize(session["access_token"]) is None
+    with db.connect() as con:
+        assert con.execute("SELECT state FROM remote_devices WHERE id=?", (device["device_id"],)).fetchone()[0] == "expired"
+        assert con.execute("SELECT state FROM remote_pairing_requests WHERE id=?", (pairing["request_id"],)).fetchone()[0] == "expired"
+
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('r','fixture',?)", (str(tmp_path),))
+        con.execute("INSERT INTO tasks(id,title,objective,repository_id,file_globs) VALUES('t','t','long enough objective','r','[\"**/*\"]')")
+        con.execute("INSERT INTO remote_invites(id,token_hash,state,created_at,expires_at) VALUES('i','hashed-invite','issued','now','later')")
+        con.execute("INSERT INTO remote_devices(id,client_id,client_name,token_hash,state,created_at,last_seen,expires_at) "
+                    "VALUES('d','id','name','hashed-session','active','now','now','later')")
+        con.execute("INSERT INTO remote_task_diff_grants(device_id,task_id,revision_sha,granted_at) VALUES('d','t',?,'now')",
+                    ("a"*40,))
+    portability._scrub_snapshot_database(db.DB_PATH)
+    with db.connect() as con:
+        for table in ("remote_invites", "remote_devices", "remote_task_diff_grants", "remote_pairing_requests"):
+            assert con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] == 0
+
+
+def test_schema_v7_migration_backs_up_before_remote_tables(tmp_path, monkeypatch):
+    import sqlite3
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "remote-migration.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("DROP TABLE remote_task_diff_grants")
+        con.execute("DROP TABLE remote_devices")
+        con.execute("DROP TABLE remote_pairing_requests")
+        con.execute("DROP TABLE remote_invites")
+        con.execute("PRAGMA user_version=7")
+    db.init_db()
+    backups = list((tmp_path / "backups").glob("pre-migration-v7-*.sqlite3"))
+    assert len(backups) == 1
+    with sqlite3.connect(backups[0]) as con:
+        assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='remote_devices'").fetchone()[0] == 0
+    with db.connect() as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='remote_devices'").fetchone()[0] == 1
 
 
