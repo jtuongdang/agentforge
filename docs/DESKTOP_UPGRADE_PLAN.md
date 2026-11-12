@@ -6,6 +6,8 @@ Trạng thái: **đang triển khai theo phase** trên nhánh `codex/desktop-upg
 
 ### Đóng gói nội bộ — cập nhật 12/11/2026
 
+Đã công bố [GitHub prerelease v0.1.0-alpha.1](https://github.com/jtuongdang/agentforge/releases/tag/v0.1.0-alpha.1), tag tại `f3137b0`: 2 DMG, EXE, MSI, hướng dẫn, manifest và SHA256SUMS. Hai DMG đều pass kiểm tra image và đúng kiến trúc; installer Windows khớp hash CI. Dung lượng và SHA-256 trên GitHub khớp cả 7 asset local trước khi publish. Các commit đóng gói bên dưới có mã runtime giống release commit (đã đối chiếu Git diff); manifest ghi riêng source commit thực tế của mỗi installer. Đây là mốc đóng gói alpha nội bộ, chưa đóng cổng phát hành production của Phase 7A.
+
 | Target | Commit | Trạng thái gần nhất |
 |---|---|---|
 | macOS Intel | `b69f3c4` | [Job 131031659954](https://github.com/jtuongdang/agentforge/actions/runs/43172793380/job/131031659954) pass build, DMG, packaged smoke và upload. Đã tải DMG về, `hdiutil verify` và SHA-256 pass. |

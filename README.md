@@ -30,6 +30,16 @@ The launcher creates `.venv`, installs the pinned Python requirements, starts Fa
 
 ## Desktop alpha (macOS and Windows)
 
+Download [v0.1.0-alpha.1](https://github.com/jtuongdang/agentforge/releases/tag/v0.1.0-alpha.1), an internal alpha prerelease:
+
+| Platform | Installer |
+|---|---|
+| macOS Apple silicon | [ARM64 DMG](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.1/DevAgent-Orchestrator_0.1.0_macos-arm64.dmg) |
+| macOS Intel | [x64 DMG](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.1/DevAgent-Orchestrator_0.1.0_macos-x64.dmg) |
+| Windows x64 | [EXE](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.1/DevAgent-Orchestrator_0.1.0_windows-x64-setup.exe) or [MSI](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.1/DevAgent-Orchestrator_0.1.0_windows-x64.msi) |
+
+The release includes [SHA256SUMS](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.1/SHA256SUMS), a source manifest and installation instructions. All three target builds passed packaged smoke; both DMGs passed image verification and GitHub's SHA-256 digests matched all seven uploaded files. The alpha is unsigned/not notarized and is not a production release.
+
 Install Node.js and Rust/Cargo on the build machine, then run `npm run desktop:dev` from `dashboard/` for the Tauri shell with a source Python backend. `npm run tauri build` builds the frontend and runs `scripts/build_desktop.mjs` to compile the backend into a self-contained Nuitka sidecar for the host target. The packaged app uses a random loopback port and platform application data directory; the installed machine does not need Python, Node.js, or npm. Cross-architecture packages must be built separately on their target architecture.
 
 To limit build CPU usage, set `NUITKA_BUILD_JOBS=1 CARGO_BUILD_JOBS=1` before `npm run tauri build`; the Nuitka script defaults to one job when unset.
