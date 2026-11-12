@@ -30,15 +30,15 @@ The launcher creates `.venv`, installs the pinned Python requirements, starts Fa
 
 ## Desktop alpha (macOS and Windows)
 
-Download [v0.1.0-alpha.1](https://github.com/jtuongdang/agentforge/releases/tag/v0.1.0-alpha.1), an internal alpha prerelease:
+Download [v0.1.0-alpha.2](https://github.com/jtuongdang/agentforge/releases/tag/v0.1.0-alpha.2), an internal alpha prerelease (built from `af333ea` on `codex/desktop-upgrade`):
 
 | Platform | Installer |
 |---|---|
-| macOS Apple silicon | [ARM64 DMG](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.1/DevAgent-Orchestrator_0.1.0_macos-arm64.dmg) |
-| macOS Intel | [x64 DMG](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.1/DevAgent-Orchestrator_0.1.0_macos-x64.dmg) |
-| Windows x64 | [EXE](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.1/DevAgent-Orchestrator_0.1.0_windows-x64-setup.exe) or [MSI](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.1/DevAgent-Orchestrator_0.1.0_windows-x64.msi) |
+| macOS Apple silicon | Pending CI (`aarch64-apple-darwin` queued in run `43225494967`); previous build: [alpha.1 ARM64 DMG](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.1/DevAgent-Orchestrator_0.1.0_macos-arm64.dmg) |
+| macOS Intel | [x64 DMG](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.2/DevAgent-Orchestrator_0.1.0_macos-x64.dmg) |
+| Windows x64 | [EXE](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.2/DevAgent-Orchestrator_0.1.0_windows-x64-setup.exe) or [MSI](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.2/DevAgent-Orchestrator_0.1.0_windows-x64.msi) |
 
-The release includes [SHA256SUMS](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.1/SHA256SUMS), a source manifest and installation instructions. All three target builds passed packaged smoke; both DMGs passed image verification and GitHub's SHA-256 digests matched all seven uploaded files. The alpha is unsigned/not notarized and is not a production release.
+The release includes [SHA256SUMS](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.2/SHA256SUMS), a source manifest and installation instructions. The `x86_64-apple-darwin` and `x86_64-pc-windows-msvc` builds passed packaged backend smoke and SHA-256 verification against CI manifests. The alpha is unsigned/not notarized and is not a production release.
 
 Install Node.js and Rust/Cargo on the build machine, then run `npm run desktop:dev` from `dashboard/` for the Tauri shell with a source Python backend. `npm run tauri build` builds the frontend and runs `scripts/build_desktop.mjs` to compile the backend into a self-contained Nuitka sidecar for the host target. The packaged app uses a random loopback port and platform application data directory; the installed machine does not need Python, Node.js, or npm. Cross-architecture packages must be built separately on their target architecture.
 
@@ -73,7 +73,8 @@ Google AgentForge identity, broker sessions and per-user profiles remain under
 implementation; CLI login does not fulfill Google verification. See the
 [approved linking proposal](docs/DESKTOP_ACCOUNT_AGENT_LINKING_PROPOSAL.md) and
 [current implementation checkpoint](docs/ACCOUNT_LINKING_PROGRESS.md). The
-published alpha.1 installers predate this source upgrade.
+`v0.1.0-alpha.2` installers (macOS Intel and Windows x64) include the account
+directory sync, Desktop AccountPanel and EN/VI i18n updates from `af333ea`.
 
 License Hub + user/license/device admin is published at
 [Docker Hub](https://hub.docker.com/r/jtuongdev/agentforge-admin), tag
