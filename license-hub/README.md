@@ -19,7 +19,18 @@ exercised against an external/production MongoDB service.
 
 For local tests, start a MongoDB process bound only to `127.0.0.1`, copy
 `.env.example` to `.env`, replace its placeholders with disposable test values,
-then load that ignored file into the process environment before `dotnet run`.
+then use the launcher from the repository root:
+
+```sh
+python3 scripts/run_license_hub.py --check-config
+python3 scripts/run_license_hub.py
+```
+
+The launcher reads `license-hub/.env` without evaluating shell commands, checks
+required settings without printing their values, builds with one MSBuild worker,
+and starts the hub. Existing process environment variables take precedence over
+the file. Use `--no-build` after a successful build or `--env-file` for a separate
+staging configuration. Keep the env file readable only by its owner (`chmod 600`).
 The template uses a local MongoDB URI and is not a production deployment file.
 
 ## Runtime configuration

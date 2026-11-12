@@ -94,7 +94,8 @@ def live_hub(tmp_path):
         environment = os.environ.copy()
         environment.update({
             "MONGODB_URI": external_mongo_uri or f"mongodb://127.0.0.1:{mongo_port}/?directConnection=true",
-            "LICENSE_DATABASE": f"LicenseHubIntegration_{uuid.uuid4().hex}",
+            # Atlas deployments may limit database names to 38 bytes.
+            "LICENSE_DATABASE": f"LicenseHubIT_{uuid.uuid4().hex[:24]}",
             "LICENSE_SIGNING_PRIVATE_KEY_PATH": str(private_file),
             "LICENSE_KEY_PEPPER": base64.b64encode(bytes(range(32))).decode("ascii"),
             "LICENSE_ADMIN_TOKEN": "local-integration-admin-token-not-for-production-0001",
