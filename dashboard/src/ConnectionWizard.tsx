@@ -83,50 +83,107 @@ export function ConnectionWizard({ api, agents = [], onRefresh }: { api: Api; ag
   const anyAiReady = codexReady || copilotReady || antigravityReady
 
   return <section className="panel connection-wizard">
-    <div className="panel-heading"><div><div className="eyebrow">{t('connEyebrow')}</div><h2>{t('connTitle')}</h2><p>{t('connSubtitle')}</p></div></div>
-    <div className={`ai-readiness-bar ${anyAiReady ? 'ready' : 'pending'}`} role="status">
-      <div className="ai-readiness-head">
-        <span className={`status-dot ${anyAiReady ? 'online' : ''}`}/>
-        <strong>{t('connReadinessTitle')}:</strong>
-        <span>{anyAiReady ? t('connReadinessReady') : t('connReadinessPending')}</span>
+    <div className="panel-heading">
+      <div>
+        <div className="eyebrow">{t('connEyebrow')}</div>
+        <h2>{t('connTitle')}</h2>
+        <p>{t('connSubtitle')}</p>
       </div>
-      <div className="ai-readiness-pills">
-        <span className={`readiness-pill ${codexReady ? 'ready' : 'pending'}`}>
-          {codexReady ? '✓' : '○'} Codex · {codexReady ? t('connStatusReady') : t('connStatusNotVerified')}
-        </span>
-        <span className={`readiness-pill ${antigravityReady ? 'ready' : 'pending'}`}>
-          {antigravityReady ? '✓' : '○'} Antigravity · {antigravityReady ? t('connStatusReady') : t('connStatusNotVerified')}
-        </span>
-        <span className={`readiness-pill ${copilotReady ? 'handoff' : 'pending'}`}>
-          {copilotReady ? '✓' : '○'} Copilot · {copilotReady ? t('connCopilotPolicyNote') : t('connStatusNotVerified')}
-        </span>
+      <div className={`ai-readiness-bar ${anyAiReady ? 'ready' : 'pending'}`} role="status">
+        <div className="ai-readiness-head">
+          <span className={`status-dot ${anyAiReady ? 'online' : ''}`}/>
+          <strong>{t('connReadinessTitle')}:</strong>
+          <span>{anyAiReady ? t('connReadinessReady') : t('connReadinessPending')}</span>
+        </div>
       </div>
     </div>
-    <div className="form-note"><b>{t('connStep1Title')}</b><p>{t('connStep1Desc')}</p></div>
-    <div className="form-note"><b>{t('connStep2Title')}</b><p>{t('connStep2Desc')}</p>
-      <label><input type="checkbox" checked={storageConsent} onChange={e => setStorageConsent(e.target.checked)} disabled={login.state === 'running'}/> {t('connStorageConsent')}</label>
-      {storage === false && <p role="alert">{t('connKeychainUnavailable')}</p>}
-      <div className="setup-actions">
-        <button className={`button secondary ${codexReady ? 'connected' : ''}`} disabled={disabled} onClick={() => void start('codex')}>
-          {codexReady ? `✓ ${t('connLoginCodex')} (${t('connConnectedSuffix')})` : t('connLoginCodex')}
-        </button>
-        <button className={`button secondary ${antigravityReady ? 'connected' : ''}`} disabled={disabled} onClick={() => void start('antigravity')}>
-          {antigravityReady ? `✓ ${t('connLoginAntigravity')} (${t('connConnectedSuffix')})` : t('connLoginAntigravity')}
-        </button>
-        <button className={`button secondary ${copilotReady ? 'connected' : ''}`} disabled={disabled || !storageConsent} onClick={() => void start('copilot')}>
-          {copilotReady ? `✓ ${t('connLoginCopilot')} (${t('connConnectedSuffix')})` : t('connLoginCopilot')}
-        </button>
-        <button className="button secondary" disabled={disabled || !storageConsent} onClick={() => void start('github')}>{t('connLoginGithub')}</button>
+
+    <div className="wizard-provider-list">
+      <div className="wizard-provider-row">
+        <div className="wizard-provider-info">
+          <span className={`status-dot ${codexReady ? 'online' : ''}`}/>
+          <div>
+            <strong>OpenAI Codex CLI</strong>
+            <small>{codexReady ? t('connStatusReady') : t('connStatusNotVerified')} · Keychain</small>
+          </div>
+        </div>
+        <div className="wizard-provider-actions">
+          <span className={`readiness-pill ${codexReady ? 'ready' : 'pending'}`}>
+            {codexReady ? `✓ ${t('connStatusReady')}` : t('connStatusNotVerified')}
+          </span>
+          <button className={`button secondary ${codexReady ? 'connected' : ''}`} disabled={disabled} onClick={() => void start('codex')}>
+            {codexReady ? `✓ ${t('connLoginCodex')}` : t('connLoginCodex')}
+          </button>
+        </div>
       </div>
-      <p>{t('connHint')}</p>
+
+      <div className="wizard-provider-row">
+        <div className="wizard-provider-info">
+          <span className={`status-dot ${antigravityReady ? 'online' : ''}`}/>
+          <div>
+            <strong>Google Antigravity</strong>
+            <small>{antigravityReady ? t('connStatusReady') : t('connStatusNotVerified')} · Local App / CLI</small>
+          </div>
+        </div>
+        <div className="wizard-provider-actions">
+          <span className={`readiness-pill ${antigravityReady ? 'ready' : 'pending'}`}>
+            {antigravityReady ? `✓ ${t('connStatusReady')}` : t('connStatusNotVerified')}
+          </span>
+          <button className={`button secondary ${antigravityReady ? 'connected' : ''}`} disabled={disabled} onClick={() => void start('antigravity')}>
+            {antigravityReady ? `✓ ${t('connLoginAntigravity')}` : t('connLoginAntigravity')}
+          </button>
+        </div>
+      </div>
+
+      <div className="wizard-provider-row">
+        <div className="wizard-provider-info">
+          <span className={`status-dot ${copilotReady ? 'online' : ''}`}/>
+          <div>
+            <strong>GitHub Copilot CLI</strong>
+            <small>{copilotReady ? t('connCopilotPolicyNote') : t('connStatusNotVerified')}</small>
+          </div>
+        </div>
+        <div className="wizard-provider-actions">
+          <span className={`readiness-pill ${copilotReady ? 'handoff' : 'pending'}`}>
+            {copilotReady ? `✓ ${t('connCopilotPolicyNote')}` : t('connStatusNotVerified')}
+          </span>
+          <button className={`button secondary ${copilotReady ? 'connected' : ''}`} disabled={disabled || !storageConsent} onClick={() => void start('copilot')}>
+            {copilotReady ? `✓ ${t('connLoginCopilot')}` : t('connLoginCopilot')}
+          </button>
+        </div>
+      </div>
+
+      <div className="wizard-provider-row">
+        <div className="wizard-provider-info">
+          <span className="status-dot online"/>
+          <div>
+            <strong>GitHub CLI (Pull Request)</strong>
+            <small>{t('connStep3Desc')}</small>
+          </div>
+        </div>
+        <div className="wizard-provider-actions">
+          <button className="button secondary" disabled={disabled || !storageConsent} onClick={() => void start('github')}>
+            {t('connLoginGithub')}
+          </button>
+        </div>
+      </div>
     </div>
+
+    <div className="wizard-consent-bar">
+      <label className="account-checkbox">
+        <input type="checkbox" checked={storageConsent} onChange={e => setStorageConsent(e.target.checked)} disabled={login.state === 'running'}/>
+        <span>{t('connStorageConsent')}</span>
+      </label>
+      <small className="muted">{t('connHint')}</small>
+    </div>
+
+    {storage === false && <p role="alert" className="account-error">{t('connKeychainUnavailable')}</p>}
     {login.state !== 'idle' && <div className={`form-note ${login.state === 'completed' ? 'success' : ''}`} role="status">
       <b>{login.provider} · {login.state === 'completed' ? `✓ ${login.state}` : login.state}</b>
       <p>{login.state === 'completed' ? t('connCompletedReady') : login.message}</p>
       {login.device_code && <p>{t('connOneTimeCode')} <strong>{login.device_code}</strong> · <a href="https://github.com/login/device" target="_blank" rel="noreferrer">github.com/login/device</a></p>}
       {login.state === 'running' && <button className="button secondary" disabled={busy} onClick={() => void cancel()}>{t('connCancelLogin')}</button>}
     </div>}
-    <div className="form-note"><b>{t('connStep3Title')}</b><p>{t('connStep3Desc')}</p></div>
-    {error && <p role="alert">{error}</p>}
+    {error && <p role="alert" className="account-error">{error}</p>}
   </section>
 }

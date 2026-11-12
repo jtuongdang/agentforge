@@ -95,11 +95,39 @@ async function downloadCheckpoint(checkpointId: string, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000)
 }
 
-const date = (value?: string) => value ? new Date(value.replace(' ', 'T')).toLocaleString() : '—'
+// SQLite CURRENT_TIMESTAMP lưu giờ UTC dạng "YYYY-MM-DD HH:MM:SS" (không có hậu tố múi giờ).
+// Nếu không gắn 'Z', trình duyệt hiểu nhầm là giờ địa phương → lệch đúng bằng độ lệch múi giờ (VN: -7h).
+const parseServerDate = (value: string) => {
+  let iso = value.trim().replace(' ', 'T')
+  if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(iso)) iso += 'Z'
+  return new Date(iso)
+}
+const date = (value?: string) => {
+  if (!value) return '—'
+  const parsed = parseServerDate(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString('vi-VN', { hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
 const statusLabel: Record<string, string> = {
-  queued: 'Queued', planning: 'Planning', waiting_for_contract: 'Contract gate', waiting_for_scope: 'Waiting for file scope', assigned: 'Assigned', running: 'Running',
-  validating: 'Validating', recovering: 'Retrying', handoff_ready: 'IDE handoff', awaiting_pr_approval: 'Needs PR approval',
-  publishing: 'Publishing', draft_pr: 'Draft PR', completed: 'Complete', failed: 'Failed', blocked: 'Blocked', cancelled: 'Cancelled',
+  queued: 'Đang chờ (Queued)', planning: 'Đang lập kế hoạch', waiting_for_contract: 'Chờ duyệt Contract', waiting_for_scope: 'Chờ khoanh vùng file',
+  assigned: 'Đã giao Agent', running: 'Đang thực thi', validating: 'Đang kiểm thử Build', recovering: 'Đang thử lại',
+  handoff_ready: 'Chờ bàn giao IDE', awaiting_pr_approval: 'Chờ duyệt PR', publishing: 'Đang đẩy nhánh',
+  draft_pr: 'Đã tạo Draft PR', completed: 'Hoàn tất', failed: 'Thất bại', blocked: 'Đang bị chặn', cancelled: 'Đã dừng',
+}
+const priorityLabelMap: Record<string, string> = {
+  urgent: 'Khẩn cấp', high: 'Ưu tiên cao', normal: 'Bình thường', low: 'Thấp',
+}
+function cleanObjective(raw?: string): string {
+  if (!raw) return ''
+  let text = raw.trim()
+  while (/^objective:\s*/i.test(text)) {
+    text = text.replace(/^objective:\s*/i, '').trim()
+  }
+  const cutoff = text.search(/\n\s*(?:Acceptance criteria:|Execution checklist:|Allowed file globs:)/i)
+  if (cutoff !== -1) {
+    text = text.slice(0, cutoff).trim()
+  }
+  return text
 }
 
 function App() {
@@ -139,6 +167,19 @@ function App() {
   const [taskAgentId, setTaskAgentId] = useState('')
   const [taskBaseBranch, setTaskBaseBranch] = useState('')
   const [branchOptions, setBranchOptions] = useState<RepoBranch[]>([])
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    try { return window.localStorage.getItem('agentforge.theme') === 'dark' ? 'dark' : 'light' } catch { return 'light' }
+  })
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try { return window.localStorage.getItem('agentforge.sidebarCollapsed') === '1' } catch { return false }
+  })
+  useEffect(() => {
+    try { window.localStorage.setItem('agentforge.sidebarCollapsed', sidebarCollapsed ? '1' : '0') } catch { /* ignore */ }
+  }, [sidebarCollapsed])
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    try { window.localStorage.setItem('agentforge.theme', theme) } catch { /* ignore */ }
+  }, [theme])
 
   const pickRepositoryPath = async () => {
     try {
@@ -184,7 +225,8 @@ function App() {
     const timer = window.setInterval(() => void refreshStorage(), 30000)
     return () => window.clearInterval(timer)
   }, [nav, refreshStorage])
-  const selectedTaskId = selected?.id
+  const activeTask = selected ?? (nav === 'Tasks' ? tasks[0] ?? null : null)
+  const selectedTaskId = activeTask?.id
   const selectedTaskAgent = agents.find(agent => agent.id === taskAgentId)
   useEffect(() => {
     const activeTaskId = selectedTaskId
@@ -404,16 +446,16 @@ function App() {
     catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
 
-  return <div className="shell">
+  return <div className={sidebarCollapsed ? 'shell sidebar-collapsed' : 'shell'}>
     <aside className="sidebar">
-      <div className="brand"><div className="brand-mark">D</div><div><strong>{t('brandTitle')}</strong><small>{t('brandSubtitle')}</small></div></div>
+      <div className="brand"><div className="brand-mark">D</div><div className="brand-text"><strong>{t('brandTitle')}</strong><small>{t('brandSubtitle')}</small></div><button type="button" className="sidebar-toggle" onClick={() => setSidebarCollapsed(v => !v)} title={sidebarCollapsed ? 'Mở rộng thanh bên' : 'Thu gọn thanh bên'} aria-label={sidebarCollapsed ? 'Mở rộng thanh bên' : 'Thu gọn thanh bên'} aria-expanded={!sidebarCollapsed}>{sidebarCollapsed ? '»' : '«'}</button></div>
       <div className="workspace"><span className="pulse"/><div><small>{t('workspaceLabel')}</small><strong>{t('workspaceTitle')}</strong></div><span className="chevron">⌄</span></div>
       <div className="nav-label">{t('workspaceLabel')}</div>
-      <nav>{(['Overview', 'Tasks', 'Agents', 'Contracts', 'History', 'Storage', 'Fleet', 'Remote'] as Nav[]).map((item, i) => <button key={item} className={nav === item ? 'nav-item active' : 'nav-item'} onClick={() => setNav(item)}><span className="nav-icon">{['◫', '☷', '◇', '⌘', '◷', '▤', '▥','⇄'][i]}</span>{navLabels[item]}{item === 'Tasks' && tasks.length > 0 && <span className="nav-count">{tasks.length}</span>}</button>)}</nav>
+      <nav>{(['Overview', 'Tasks', 'Agents', 'Contracts', 'History', 'Storage', 'Fleet', 'Remote'] as Nav[]).map((item, i) => <button key={item} className={nav === item ? 'nav-item active' : 'nav-item'} onClick={() => setNav(item)} title={sidebarCollapsed ? navLabels[item] : undefined}><span className="nav-icon">{['◫', '☷', '◇', '⌘', '◷', '▤', '▥','⇄'][i]}</span><span className="nav-text">{navLabels[item]}</span>{item === 'Tasks' && tasks.length > 0 && <span className="nav-count">{tasks.length}</span>}</button>)}</nav>
       <div className="sidebar-bottom"><div className="connection"><span className={health?.ok ? 'status-dot online' : 'status-dot'}/><span>{health?.ok ? t('engineConnected') : t('engineConnecting')}</span></div><small>{t('versionNote')}</small></div>
     </aside>
     <main className="main">
-      <header className="topbar"><div className="breadcrumbs">{t('breadcrumbRoot')} <span>/</span> <b>{navLabels[nav]}</b></div><div className="top-actions"><select className="lang-switch" aria-label={t('langLabel')} value={mode} onChange={e => setMode(e.target.value as LangMode)}><option value="auto">{t('langAuto')} ({lang.toUpperCase()})</option><option value="vi">{t('langVi')}</option><option value="en">{t('langEn')}</option></select><span className="local-tag"><span/>{t('localBadge')}</span><button className="icon-btn" title={t('refreshTitle')} onClick={() => void refresh()}>⟳</button><div className="avatar">JT</div></div></header>
+      <header className="topbar"><div className="topbar-left"><button type="button" className="topbar-sidebar-btn" onClick={() => setSidebarCollapsed(v => !v)} title={sidebarCollapsed ? 'Mở thanh bên' : 'Thu nhỏ thanh bên'} aria-label={sidebarCollapsed ? 'Mở thanh bên' : 'Thu nhỏ thanh bên'} aria-expanded={!sidebarCollapsed}><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor" strokeWidth="1.3"/><line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" strokeWidth="1.3"/>{!sidebarCollapsed && <rect x="2.2" y="3.2" width="3.2" height="9.6" rx="1" fill="currentColor" opacity="0.35"/>}</svg><span>{sidebarCollapsed ? 'Mở thanh bên' : 'Thu nhỏ'}</span></button><div className="breadcrumbs">{t('breadcrumbRoot')} <span>/</span> <b>{navLabels[nav]}</b></div></div><div className="top-actions"><button type="button" className="theme-switch" onClick={() => setTheme(current => current === 'light' ? 'dark' : 'light')}>{theme === 'light' ? 'Tone: Sáng dịu' : 'Tone: Tối dịu'}</button><select className="lang-switch" aria-label={t('langLabel')} value={mode} onChange={e => setMode(e.target.value as LangMode)}><option value="auto">{t('langAuto')} ({lang.toUpperCase()})</option><option value="vi">{t('langVi')}</option><option value="en">{t('langEn')}</option></select><span className="local-tag"><span/>{t('localBadge')}</span><button className="icon-btn" title={t('refreshTitle')} onClick={() => void refresh()}>⟳</button><div className="avatar">JT</div></div></header>
       {error && <div className="toast-error"><span>!</span>{error}<button onClick={() => setError('')}>×</button></div>}
       <div className="page">
         <div className="page-heading"><div><div className="eyebrow">{t('controlPlaneEyebrow')}</div><h1>{nav === 'Overview' ? t('overviewTitle') : navLabels[nav]}</h1><p>{nav === 'Overview' ? t('overviewSubtitle') : pageDescription(nav)}</p></div>
@@ -422,8 +464,10 @@ function App() {
         </div>
         {nav === 'Overview' && <>
           {health?.ok && (repos.length === 0 || !agents.some(agent => agent.enabled && agent.available)) && <ConnectionWizard api={api} agents={agents} onRefresh={refresh}/>}
-          <AccountPanel api={api}/>
-          <LicensePanel/>
+          <div className="two-col identity-grid">
+            <AccountPanel api={api}/>
+            <LicensePanel/>
+          </div>
           {repos.length === 0 && <section className="setup-wizard panel"><div><div className="eyebrow">{t('firstRunEyebrow')}</div><h2>{t('connectRepoTitle')}</h2><p>{t('connectRepoDesc')}</p></div><div className="setup-steps"><span className="current">{t('stepRepo')}</span><span>{t('stepValidation')}</span><span>{t('stepAgent')}</span></div><div className="setup-actions"><button className="button primary" onClick={() => setShowRepoForm(true)}>{t('chooseRepoBtn')}</button><button className="button secondary" onClick={async () => { try { await api('/agents/refresh', { method: 'POST' }); await refresh() } catch (e) { setError(String(e)) } }}>{t('detectAgentsBtn')}</button></div></section>}
           <section className="stat-grid">
             <StatCard label={t('statActiveTitle')} value={counts.active} note={t('statActiveNote')} icon="◷" tone="blue"/>
@@ -436,8 +480,18 @@ function App() {
           <section className="two-col"><div className="panel"><div className="panel-heading"><div><h2>{t('agentRegistryTitle')}</h2><p>{t('agentRegistrySubtitle')}</p></div><button className="text-button" onClick={() => setNav('Agents')}>{t('manageBtn')}</button></div><AgentList agents={agents.filter(a => a.enabled).slice(0, 3)}/></div>
             <div className="panel"><div className="panel-heading"><div><h2>{t('registeredReposTitle')}</h2><p>{t('registeredReposSubtitle')}</p></div><div className="panel-buttons"><span className="count-pill">{repos.length}</span><button className="button secondary" onClick={() => setShowRepoForm(true)}>{t('addRepoBtn')}</button></div></div>{repos.map(repo => <div className="repo-row" key={repo.id}><div className="repo-icon">⌘</div><div className="repo-info"><b>{repo.name}</b><small>{repo.path}</small></div><span className="branch-pill">{repo.default_branch}</span><span className="branch-pill">{repo.validation_profile.toUpperCase()} CHECK</span></div>)}</div></section>
         </>}
-        {nav === 'Tasks' && <><div className="filter-row"><span className="filter-summary">{tasks.length} tasks total</span><span className="spacer"/><span className="hint">Select a task to inspect logs and validation.</span></div><TaskTable tasks={tasks} onSelect={setSelected} selectedId={selected?.id}/>{selected && <TaskInspector task={selected} tasks={tasks} events={events} onApprove={() => setApproval(selected)} onCompleteLocal={() => void completeLocally(selected)} onCancel={() => void cancel(selected)} onHandoff={() => void handoff(selected)} onRecoverRestart={() => void recoverRestart(selected)}/>}</>}
-      {nav === 'Agents' && <><ConnectionWizard api={api} agents={agents} onRefresh={refresh}/><AccountPanel api={api}/><LicensePanel/><div className="panel"><div className="panel-heading"><div><h2>{t('registeredAgentsTitle')}</h2><p>{t('registeredAgentsDesc')}</p></div><div className="panel-buttons"><button className="button secondary" onClick={async () => { try { await api('/agents/refresh', { method: 'POST' }); await refresh() } catch (e) { setError(String(e)) } }}>{t('refreshDetectionBtn')}</button><button className="button secondary" onClick={() => setShowAgentForm(true)}>{t('registerAdapterBtn')}</button></div></div><AgentList agents={agents} detailed busyAgentId={busyAgentId} onCheckToken={checkAgentToken} onRemove={removeAgent} onRestore={restoreAgent}/></div><ProviderConnections/></>}
+        {nav === 'Tasks' && <>
+          <div className="filter-row">
+            <span className="filter-summary">{tasks.length} tác vụ trong hệ thống</span>
+            <span className="spacer"/>
+            <span className="hint">Bấm vào từng tác vụ bên trái để xem Nhật ký hoạt động & Code Diff chi tiết ở khung bên phải.</span>
+          </div>
+          <div className={activeTask ? 'tasks-split-layout' : ''}>
+            <TaskTable tasks={tasks} onSelect={setSelected} selectedId={activeTask?.id}/>
+            {activeTask && <TaskInspector key={activeTask.id} task={activeTask} tasks={tasks} events={events} onApprove={() => setApproval(activeTask)} onCompleteLocal={() => void completeLocally(activeTask)} onCancel={() => void cancel(activeTask)} onHandoff={() => void handoff(activeTask)} onRecoverRestart={() => void recoverRestart(activeTask)}/>}
+          </div>
+        </>}
+      {nav === 'Agents' && <><div className="agents-top-grid"><ConnectionWizard api={api} agents={agents} onRefresh={refresh}/><div className="identity-stack"><AccountPanel api={api}/><LicensePanel/></div></div><div className="panel"><div className="panel-heading"><div><h2>{t('registeredAgentsTitle')}</h2><p>{t('registeredAgentsDesc')}</p></div><div className="panel-buttons"><button className="button secondary" onClick={async () => { try { await api('/agents/refresh', { method: 'POST' }); await refresh() } catch (e) { setError(String(e)) } }}>{t('refreshDetectionBtn')}</button><button className="button secondary" onClick={() => setShowAgentForm(true)}>{t('registerAdapterBtn')}</button></div></div><AgentList agents={agents} detailed busyAgentId={busyAgentId} onCheckToken={checkAgentToken} onRemove={removeAgent} onRestore={restoreAgent}/></div><ProviderConnections/></>}
         {nav === 'Contracts' && <div className="panel"><div className="panel-heading"><div><h2>Shared interfaces</h2><p>Approve contracts before dependent tasks can execute.</p></div></div>{contracts.length ? contracts.map(c => <div className="contract-row" key={c.id}><div className="contract-icon">⌘</div><div className="contract-content"><div><b>{c.title}</b><span className={`badge ${c.state === 'approved' ? 'success' : 'warning'}`}>{c.state}</span></div><p>{c.body}</p><small>v{c.version} · {c.id}</small></div>{c.state === 'proposed' && <button className="button secondary" onClick={() => void approveContract(c.id)}>Approve contract</button>}</div>) : <Empty title="No interface contracts" text="Propose shared API or data decisions before scheduling dependent work."/>}</div>}
         {nav === 'History' && <History tasks={tasks.filter(t => ['draft_pr', 'completed', 'failed', 'blocked', 'cancelled'].includes(t.status))} onSelect={setSelected}/>}
         {nav === 'Storage' && <StoragePage metrics={storage} error={storageError} busy={storageBusy} onRefresh={() => void refreshStorage()}/>}
@@ -595,7 +649,74 @@ function RemotePage({status,invite,tasks,busy,onCreateInvite,onApprove,onDeny,on
 }
 function pageDescription(nav: Nav) { switch (nav) { case 'Tasks': return 'Plan, assign, validate and review isolated work.'; case 'Agents': return 'Register executors by capability and allowed file scope.'; case 'Contracts': return 'Coordinate shared interfaces before dependent tasks run.'; case 'History': return 'Completed work, blocked runs and Draft PR records.'; case 'Storage': return 'Theo dõi SQLite, worktree và dung lượng ổ đĩa trên máy.'; case 'Remote': return 'Manage VPN browser pairing, device approvals and per-task diff access.'; default: return 'Coordinate independent agents across your registered Git projects.' } }
 function StatCard({label,value,note,icon,tone}:{label:string;value:number;note:string;icon:string;tone:string}) { return <div className="stat-card"><div className={`stat-icon ${tone}`}>{icon}</div><div className="stat-value">{value}</div><div className="stat-label">{label}</div><div className="stat-note">{note}</div></div> }
-function TaskTable({tasks,onSelect,selectedId}:{tasks:Task[];onSelect:(task:Task)=>void;selectedId?:string}) { return tasks.length ? <div className="table-wrap"><table><thead><tr><th>TASK</th><th>STATUS</th><th>AGENT</th><th>REPOSITORY</th><th>UPDATED</th><th/></tr></thead><tbody>{tasks.map(task => <tr key={task.id} className={selectedId === task.id ? 'selected-row' : ''} onClick={() => onSelect(task)}><td><div className="task-name"><span className="task-dot" /><b>{task.title}</b><span className={`priority-label ${task.priority || 'normal'}`}>{task.priority || 'normal'}</span></div><small className="task-id">{task.id.slice(0,8)} · {task.file_globs.join(', ')}</small></td><td><Status status={task.status}/></td><td>{task.agent_name || <span className="muted">Unassigned</span>}</td><td>{task.repository_name}</td><td>{date(task.created_at)}</td><td className="arrow">›</td></tr>)}</tbody></table></div> : <Empty title="Nothing in the queue yet" text="Create a bounded task to start an isolated agent run."/> }
+function TaskTable({tasks,onSelect,selectedId}:{tasks:Task[];onSelect:(task:Task)=>void;selectedId?:string}) {
+  if (!tasks.length) return <Empty title="Nothing in the queue yet" text="Create a bounded task to start an isolated agent run."/>
+  return <div className="task-card-list">
+    {tasks.map(task => {
+      const objective = cleanObjective(task.objective)
+      const val = task.validation || {}
+      const valPassed = typeof val.passed === 'boolean' ? val.passed : null
+      const handoffReport = typeof val.handoff_report === 'string' && val.handoff_report.trim() ? val.handoff_report.trim() : ''
+      const valSummary = typeof val.summary === 'string' && val.summary.trim() ? val.summary.trim() : ''
+      const commitSha = typeof val.commit === 'string' && val.commit ? val.commit.slice(0, 8) : ''
+      const changedPaths = Array.isArray(val.changed_paths) ? (val.changed_paths as string[]) : []
+      const shortFiles = changedPaths.slice(0, 5).map(p => p.split('/').pop() || p)
+      return <article
+        key={task.id}
+        className={`task-card-row ${selectedId === task.id ? 'is-selected' : ''}`}
+        onClick={() => onSelect(task)}
+      >
+        <header className="task-card-head">
+          <div className="task-card-top-row">
+            <div className="task-card-tags">
+              <span className="task-code-badge">#{task.id.slice(0, 8)}</span>
+              <span className={`priority-label ${task.priority || 'normal'}`}>Ưu tiên: {priorityLabelMap[task.priority || 'normal'] || task.priority || 'normal'}</span>
+            </div>
+            <div className="task-card-status-group">
+              <Status status={task.status}/>
+            </div>
+          </div>
+          <h3 className="task-card-title">{task.title}</h3>
+        </header>
+        <div className="task-card-body">
+          {objective && <p className="task-card-objective">{objective}</p>}
+          {task.acceptance_criteria?.length > 0 && (
+            <div className="task-card-criteria">
+              <span className="task-card-section-tag">Tiêu chí nghiệm thu ({task.acceptance_criteria.length}):</span>
+              <div className="task-criteria-pills">
+                {task.acceptance_criteria.slice(0, 4).map((item, idx) => <span key={idx} className="criteria-pill">✓ {item}</span>)}
+                {task.acceptance_criteria.length > 4 && <span className="criteria-pill">+{task.acceptance_criteria.length - 4} tiêu chí khác</span>}
+              </div>
+            </div>
+          )}
+          {(handoffReport || valPassed !== null || changedPaths.length > 0) && (
+            <div className={`task-card-outcome ${valPassed === false ? 'is-failed' : 'is-passed'}`}>
+              <div className="task-outcome-line">
+                <b>{valPassed === false ? '✕ Kiểm thử Build lỗi' : valPassed === true ? '✓ Kiểm thử Build đạt' : '• Kết quả thực thi'}</b>
+                {commitSha && <span className="task-commit-pill">Commit #{commitSha}</span>}
+                {changedPaths.length > 0 && <span className="task-files-pill">{changedPaths.length} file đã thay đổi: {shortFiles.join(', ')}{changedPaths.length > 5 ? ` (+${changedPaths.length - 5})` : ''}</span>}
+              </div>
+              {(handoffReport || valSummary) && <p className="task-outcome-report">{handoffReport || valSummary}</p>}
+            </div>
+          )}
+          {task.error && (
+            <div className="task-card-error">
+              <b>! Ghi chú dừng / lỗi:</b> <span>{task.error}</span>
+            </div>
+          )}
+        </div>
+        <footer className="task-card-meta">
+          <span className="task-meta-item"><b>Trợ lý AI:</b> {task.agent_name || 'Chưa phân công'}</span>
+          <span className="task-meta-item"><b>Dự án:</b> {task.repository_name}</span>
+          <span className="task-meta-item"><b>Nhánh Git:</b> {task.base_branch || task.repository_default_branch || 'main'}{task.branch ? ` → ${task.branch}` : ''}</span>
+          <span className="task-meta-item"><b>Phạm vi:</b> {task.file_globs.join(', ')}</span>
+          <span className="task-meta-item"><b>Cập nhật:</b> {date(task.created_at)}</span>
+          <button type="button" className="task-inspect-btn" onClick={e => { e.stopPropagation(); onSelect(task) }}>Xem chi tiết & Diff →</button>
+        </footer>
+      </article>
+    })}
+  </div>
+}
 function Status({status}:{status:string}) { const tone = status === 'draft_pr' || status === 'completed' ? 'success' : status === 'failed' || status === 'blocked' ? 'danger' : status === 'awaiting_pr_approval' || status === 'handoff_ready' || status === 'waiting_for_contract' || status === 'waiting_for_scope' ? 'warning' : 'blue'; return <span className={`badge ${tone}`}><span/> {statusLabel[status] || status}</span> }
 function ProviderConnections() {
   const [items, setItems] = useState<ProviderConnection[]>([])
@@ -721,14 +842,28 @@ function LicensePanel() {
 
 function AgentList({agents,detailed=false,busyAgentId,onCheckToken,onRemove,onRestore}:{agents:Agent[];detailed?:boolean;busyAgentId?:string|null;onCheckToken?:(agent:Agent)=>void;onRemove?:(agent:Agent)=>void;onRestore?:(agent:Agent)=>void}) { return agents.length ? <div className="agent-list">{agents.map(agent => <div className={`agent-row ${agent.enabled ? '' : 'agent-disabled'}`} key={agent.id}><div className={`agent-glyph ${agent.adapter}`}>{agent.adapter === 'codex' ? '✳' : agent.adapter === 'handoff' ? '↗' : '⌘'}</div><div className="agent-main"><b>{agent.name}</b><small>{agent.availability_note}</small>{detailed && <><div className="chips">{agent.capabilities.map(cap => <span key={cap}>{cap}</span>)}</div>{agent.adapter !== 'provider' && <><small className="credential-note">Token: <b>{credentialLabel(agent.credential_status)}</b>{agent.credential_checked_at ? ` · kiểm tra ${date(agent.credential_checked_at)}` : ''}{agent.credential_note ? ` · ${agent.credential_note}` : ''}</small>{agent.credential_usage?.groups?.map((group, index) => <small className="credential-note" key={index}>{String(group.label ?? group.name ?? `Quota ${index + 1}`)}: {group.remaining_percent === 'disabled' ? 'đang tắt' : group.remaining_percent != null ? `còn ${String(group.remaining_percent)}%` : ''}{group.reset_at ? ` · làm mới ${date(String(group.reset_at))}` : ''}</small>)}</>}</>}</div><div className="agent-right"><span className={`agent-state ${!agent.enabled ? 'disabled' : agent.available ? 'available' : 'manual'}`}>{!agent.enabled ? 'REMOVED' : agent.available ? 'READY' : agent.adapter === 'handoff' ? 'HANDOFF' : agent.adapter === 'copilot' && agent.credential_status === 'valid' ? 'POLICY PENDING' : 'VERIFY REQUIRED'}</span>{detailed && <><small>{agent.max_parallel} parallel · {agent.file_globs.join(', ')}</small><div className="agent-actions">{onCheckToken && agent.adapter !== 'handoff' && agent.adapter !== 'provider' && <button className="button secondary" disabled={busyAgentId === agent.id} onClick={() => onCheckToken(agent)}>{busyAgentId === agent.id ? 'Checking…' : 'Kiểm tra token'}</button>}{agent.enabled ? onRemove && <button className="button danger-outline" disabled={busyAgentId === agent.id} onClick={() => onRemove(agent)}>Gỡ khỏi hệ thống</button> : onRestore && <button className="button secondary" disabled={busyAgentId === agent.id} onClick={() => onRestore(agent)}>Khôi phục</button>}</div></>}</div></div>)}</div> : <Empty title="No agents detected" text="Register a CLI adapter or an IDE handoff target."/> }
 function credentialLabel(status:string) { return ({unchecked:'chưa kiểm tra',valid:'hợp lệ',invalid:'không hợp lệ',error:'lỗi khi kiểm tra',unsupported:'không hỗ trợ',not_applicable:'không áp dụng'} as Record<string,string>)[status] || status }
-function TaskInspector({task,tasks,events,onApprove,onCompleteLocal,onCancel,onHandoff,onRecoverRestart}:{task:Task;tasks:Task[];events:EventRow[];onApprove:()=>void;onCompleteLocal:()=>void;onCancel:()=>void;onHandoff:()=>void;onRecoverRestart:()=>void}) { return <div className="panel inspector"><TaskSummary task={task} tasks={tasks}/><TaskActivity events={events}/><TaskActions task={task} onApprove={onApprove} onCompleteLocal={onCompleteLocal} onCancel={onCancel} onHandoff={onHandoff} onRecoverRestart={onRecoverRestart}/></div> }
-function TaskDrawer({task,tasks,events,onClose,onApprove,onCompleteLocal,onCancel,onHandoff,onRecoverRestart}:{task:Task;tasks:Task[];events:EventRow[];onClose:()=>void;onApprove:()=>void;onCompleteLocal:()=>void;onCancel:()=>void;onHandoff:()=>void;onRecoverRestart:()=>void}) {
+function TaskInspector({task,tasks,events,onApprove,onCompleteLocal,onCancel,onHandoff,onRecoverRestart}:{task:Task;tasks:Task[];events:EventRow[];onApprove:()=>void;onCompleteLocal:()=>void;onCancel:()=>void;onHandoff:()=>void;onRecoverRestart:()=>void}) {
   const [tab,setTab] = useState<'Overview'|'Activity'|'Diff'>('Overview')
-  return <><div className="drawer-shade" onClick={onClose}/><aside className="drawer"><div className="drawer-head"><div><small>Task details</small><h2>{task.title}</h2></div><button className="icon-btn" onClick={onClose}>×</button></div>
-    <div className="task-tabs">{(['Overview','Activity','Diff'] as const).map(item => <button key={item} className={tab===item?'active':''} onClick={() => setTab(item)}>{item}{item==='Activity' && events.length>0 ? ` · ${events.length}` : ''}</button>)}</div>
+  const tabLabels = { Overview: 'Tổng quan & Kết quả', Activity: 'Nhật ký hoạt động', Diff: 'Thay đổi Code (Diff)' }
+  return <div className="panel inspector">
+    <div className="inspector-head">
+      <div><small>CHI TIẾT TÁC VỤ · #{task.id.slice(0, 8)}</small><h2>{task.title}</h2></div>
+    </div>
+    <div className="task-tabs">{(['Overview','Activity','Diff'] as const).map(item => <button key={item} className={tab===item?'active':''} onClick={() => setTab(item)}>{tabLabels[item]}{item==='Activity' && events.length>0 ? ` (${events.length})` : ''}</button>)}</div>
     {tab==='Overview' && <TaskSummary task={task} tasks={tasks}/>}
     {tab==='Activity' && <TaskActivity events={events}/>}
-    {tab==='Diff' && (task.validation?.commit ? <TaskDiff taskId={task.id}/> : <Empty title="Diff is not ready" text="A validated commit is required before reviewing the complete patch."/>)}
+    {tab==='Diff' && (task.validation?.commit ? <TaskDiff taskId={task.id}/> : <Empty title="Chưa có bản Diff" text="Cần hoàn tất commit xác thực trước khi xem chi tiết thay đổi code."/>)}
+    <TaskActions task={task} onApprove={onApprove} onCompleteLocal={onCompleteLocal} onCancel={onCancel} onHandoff={onHandoff} onRecoverRestart={onRecoverRestart}/>
+  </div>
+}
+function TaskDrawer({task,tasks,events,onClose,onApprove,onCompleteLocal,onCancel,onHandoff,onRecoverRestart}:{task:Task;tasks:Task[];events:EventRow[];onClose:()=>void;onApprove:()=>void;onCompleteLocal:()=>void;onCancel:()=>void;onHandoff:()=>void;onRecoverRestart:()=>void}) {
+  const [tab,setTab] = useState<'Overview'|'Activity'|'Diff'>('Overview')
+  const tabLabels = { Overview: 'Tổng quan & Kết quả', Activity: 'Nhật ký hoạt động', Diff: 'Thay đổi Code (Diff)' }
+  return <><div className="drawer-shade" onClick={onClose}/><aside className="drawer"><div className="drawer-head"><div><small>CHI TIẾT TÁC VỤ · #{task.id.slice(0, 8)}</small><h2>{task.title}</h2></div><button className="icon-btn" onClick={onClose}>×</button></div>
+    <div className="task-tabs">{(['Overview','Activity','Diff'] as const).map(item => <button key={item} className={tab===item?'active':''} onClick={() => setTab(item)}>{tabLabels[item]}{item==='Activity' && events.length>0 ? ` (${events.length})` : ''}</button>)}</div>
+    {tab==='Overview' && <TaskSummary task={task} tasks={tasks}/>}
+    {tab==='Activity' && <TaskActivity events={events}/>}
+    {tab==='Diff' && (task.validation?.commit ? <TaskDiff taskId={task.id}/> : <Empty title="Chưa có bản Diff" text="Cần hoàn tất commit xác thực trước khi xem chi tiết thay đổi code."/>)}
     <TaskActions task={task} onApprove={onApprove} onCompleteLocal={onCompleteLocal} onCancel={onCancel} onHandoff={onHandoff} onRecoverRestart={onRecoverRestart}/></aside></> }
 
 function isGitHubRemote(remote?:string|null) { if (!remote) return false; try { return new URL(remote).hostname.toLowerCase() === 'github.com' } catch { return /^(?:[^@/]+@)?github\.com:/i.test(remote) } }
@@ -762,17 +897,46 @@ export default App
 function TaskSummary({task,tasks}:{task:Task;tasks:Task[]}) {
   const parents=task.dependencies.map(id=>tasks.find(item=>item.id===id))
   const children=tasks.filter(item=>item.dependencies.includes(task.id))
+  const val=task.validation||{}
+  const valPassed=typeof val.passed==='boolean'?val.passed:null
+  const handoffReport=typeof val.handoff_report==='string'?val.handoff_report:''
+  const valSummary=typeof val.summary==='string'?val.summary:''
+  const valTail=typeof val.tail==='string'?val.tail:''
+  const valCommit=typeof val.commit==='string'?val.commit:''
+  const changedPaths=Array.isArray(val.changed_paths)?(val.changed_paths as string[]):[]
   return <div className="task-details">
-    <div className="detail-status"><Status status={task.status}/><span className="muted">{task.id}</span><span className={`priority-label ${task.priority||'normal'}`}>{task.priority||'normal'} priority</span></div>
+    <div className="detail-status"><Status status={task.status}/><span className="muted">#{task.id.slice(0, 8)}</span><span className={`priority-label ${task.priority||'normal'}`}>Ưu tiên: {priorityLabelMap[task.priority||'normal']||task.priority||'normal'}</span></div>
     {task.writer_lease_state==='orphaned' && <div className="storage-alert warning"><b>Worker lease cần kiểm tra</b><span>Ứng dụng đã dừng khi task còn chạy. Worktree được giữ lại; hãy kiểm tra process và thay đổi trước khi khởi chạy lại task.</span></div>}
     {task.writer_lease_state==='active' && <div className="storage-alert warning"><b>Worker đang giữ quyền ghi</b><span>Run {task.writer_lease_run_id?.slice(0,8)||'—'} · agent {task.writer_lease_agent_id||'—'}.</span></div>}
-    <p className="objective">{task.objective}</p>
-    {task.acceptance_criteria?.length>0 && <div className="detail-section"><h3>Acceptance criteria</h3><ul className="criteria-list">{task.acceptance_criteria.map((item,index)=><li key={index}>{item}</li>)}</ul></div>}
-    <div className="detail-grid"><div><small>AGENT</small><b>{task.agent_name||'Not assigned'}</b></div><div><small>BASE BRANCH</small><b>{task.base_branch||task.repository_default_branch||'—'}</b></div><div><small>TASK BRANCH</small><b>{task.branch||'—'}</b></div><div><small>RETRIES</small><b>{task.retries}/{task.max_retries}</b></div><div><small>WORKTREE</small><b className="path-value">{task.worktree||'—'}</b></div></div>
-    <div className="detail-section"><h3>Dependency flow</h3><div className="dependency-flow"><div><small>Depends on</small>{parents.length ? parents.map((item,index)=><span key={task.dependencies[index]}>{item?.title||task.dependencies[index].slice(0,8)} <Status status={item?.status||'missing'}/></span>) : <span>Entry task · no prerequisites</span>}</div><b>→</b><div><small>Unlocks</small>{children.length ? children.map(item=><span key={item.id}>{item.title} <Status status={item.status}/></span>) : <span>No downstream task</span>}</div></div></div>
-    <div className="detail-section"><h3>File boundary</h3><div className="chips">{task.file_globs.map(glob=><span key={glob}>{glob}</span>)}</div></div>
-    {Object.keys(task.validation||{}).length>0 && <div className="detail-section"><h3>Validation</h3><pre className="validation">{JSON.stringify(task.validation,null,2)}</pre></div>}
-    {task.error && <div className="detail-section"><h3>Recovery note</h3><pre className="error-box">{task.error}</pre></div>}
+    <div className="detail-section"><h3>Mục tiêu tác vụ (Objective)</h3><p className="objective">{cleanObjective(task.objective)}</p></div>
+    {task.acceptance_criteria?.length>0 && <div className="detail-section"><h3>Tiêu chí nghiệm thu ({task.acceptance_criteria.length})</h3><ul className="criteria-list">{task.acceptance_criteria.map((item,index)=><li key={index}>{item}</li>)}</ul></div>}
+    <div className="detail-grid">
+      <div><small>TRỢ LÝ AI (AGENT)</small><b>{task.agent_name||'Chưa phân công'}</b></div>
+      <div><small>DỰ ÁN (REPOSITORY)</small><b>{task.repository_name||'—'}</b></div>
+      <div><small>NHÁNH GỐC (BASE)</small><b>{task.base_branch||task.repository_default_branch||'main'}</b></div>
+      <div><small>NHÁNH TÁC VỤ (BRANCH)</small><b>{task.branch||'—'}</b></div>
+      <div><small>SỐ LẦN THỬ LẠI</small><b>{task.retries}/{task.max_retries}</b></div>
+      <div><small>THỜI GIAN TẠO</small><b>{date(task.created_at)}</b></div>
+      <div className="detail-grid-wide"><small>ĐƯỜNG DẪN WORKTREE CÔ LẬP</small><b className="path-value">{task.worktree||'—'}</b></div>
+    </div>
+    {Object.keys(val).length>0 && <div className="detail-section">
+      <h3>Kết quả Kiểm thử & Bàn giao</h3>
+      <div className={`validation-card ${valPassed===false?'is-failed':'is-passed'}`}>
+        <div className="validation-head">
+          <b>{valPassed===true?'✓ ĐẠT KIỂM THỬ (BUILD SUCCEEDED)':valPassed===false?'✕ KIỂM THỬ THẤT BẠI':'• KẾT QUẢ THỰC THI'}</b>
+          {valCommit && <span className="task-commit-pill">Commit #{valCommit.slice(0, 10)}</span>}
+        </div>
+        {(handoffReport || valSummary) && <p className="validation-report">{handoffReport || valSummary}</p>}
+        {changedPaths.length>0 && <div className="validation-files">
+          <small>CÁC FILE ĐÃ THAY ĐỔI ({changedPaths.length} FILE):</small>
+          <div className="chips">{changedPaths.slice(0, 24).map(file=><span key={file}>{file}</span>)}{changedPaths.length>24 && <span>+{changedPaths.length-24} file khác</span>}</div>
+        </div>}
+        {valTail && <details className="validation-log-toggle"><summary>Xem chi tiết Log Build / Kiểm thử</summary><pre className="validation">{valTail}</pre></details>}
+      </div>
+    </div>}
+    <div className="detail-section"><h3>Luồng phụ thuộc (Dependencies)</h3><div className="dependency-flow"><div><small>Phụ thuộc vào</small>{parents.length ? parents.map((item,index)=><span key={task.dependencies[index]}>{item?.title||task.dependencies[index].slice(0,8)} <Status status={item?.status||'missing'}/></span>) : <span>Tác vụ độc lập · không phụ thuộc</span>}</div><b>→</b><div><small>Mở khóa cho</small>{children.length ? children.map(item=><span key={item.id}>{item.title} <Status status={item.status}/></span>) : <span>Không có tác vụ chờ phía sau</span>}</div></div></div>
+    <div className="detail-section"><h3>Phạm vi File cho phép sửa (Allowed Globs)</h3><div className="chips">{task.file_globs.map(glob=><span key={glob}>{glob}</span>)}</div></div>
+    {task.error && <div className="detail-section"><h3>Ghi chú dừng / Khôi phục</h3><pre className="error-box">{task.error}</pre></div>}
   </div>
 }
 
