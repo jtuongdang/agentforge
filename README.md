@@ -30,14 +30,20 @@ The launcher creates `.venv`, installs the pinned Python requirements, starts Fa
 
 ## Desktop alpha (macOS and Windows)
 
-Download [v0.1.0-alpha.3](https://github.com/jtuongdang/agentforge/releases/tag/v0.1.0-alpha.3), an internal alpha prerelease (built from `af333ea` on `codex/desktop-upgrade`):
+Download [v0.1.0-alpha.4](https://github.com/jtuongdang/agentforge/releases/tag/v0.1.0-alpha.4), an internal alpha prerelease (built from `97b1ee3` on `codex/desktop-upgrade`):
 
 | Platform | Installer |
 |---|---|
-| macOS Apple silicon | [ARM64 DMG](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.3/DevAgent-Orchestrator_0.1.0_macos-arm64.dmg) |
-| Windows x64 | [EXE](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.3/DevAgent-Orchestrator_0.1.0_windows-x64-setup.exe) or [MSI](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.3/DevAgent-Orchestrator_0.1.0_windows-x64.msi) |
+| macOS Apple silicon | [ARM64 DMG](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.4/DevAgent-Orchestrator_0.1.0_macos-arm64.dmg) |
+| Windows x64 | [EXE](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.4/DevAgent-Orchestrator_0.1.0_windows-x64-setup.exe) or [MSI](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.4/DevAgent-Orchestrator_0.1.0_windows-x64.msi) |
 
-The release includes [SHA256SUMS](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.3/SHA256SUMS) and [INSTALL.md](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.3/INSTALL.md). The Apple silicon DMG passed `hdiutil verify`; the Windows x64 installers are from CI run `43225494967` (packaged backend smoke and SHA-256 verified). Earlier `v0.1.0-alpha.1` and `v0.1.0-alpha.2` tags were revoked. The alpha is unsigned/not notarized and is not a production release.
+The release includes [SHA256SUMS](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.4/SHA256SUMS) and [INSTALL.md](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.4/INSTALL.md).
+Key updates in `v0.1.0-alpha.4`:
+- **Task Cards & Title UX**: Tách riêng dòng tiêu đề tác vụ, hiển thị trọn vẹn 100% bề ngang không bị cắt cụt hay che chữ (`word-break: break-word`).
+- **Sidebar Collapse**: Bổ sung nút thu nhỏ/mở rộng thanh bên trực quan trên thanh điều hướng topbar và đầu sidebar.
+- **Layout Alignment**: Căn sát lề nội dung chính, loại bỏ khoảng trống thừa giữa thanh bên và trang.
+- **Timezone Fix**: Chuẩn hóa hiển thị thời gian chính xác theo giờ địa phương Việt Nam (UTC -> Local), khắc phục độ lệch múi giờ.
+- **Full Vietnamese Localization**: Đồng bộ hóa nhãn ưu tiên (`Ưu tiên: ...`), kết quả kiểm thử và tiêu chí nghiệm thu.
 
 Install Node.js and Rust/Cargo on the build machine, then run `npm run desktop:dev` from `dashboard/` for the Tauri shell with a source Python backend. `npm run tauri build` builds the frontend and runs `scripts/build_desktop.mjs` to compile the backend into a self-contained Nuitka sidecar for the host target. The packaged app uses a random loopback port and platform application data directory; the installed machine does not need Python, Node.js, or npm. Cross-architecture packages must be built separately on their target architecture.
 
@@ -71,10 +77,9 @@ official app/CLI sign-in; no unsupported login command is invented.
 Google AgentForge identity, broker sessions and per-user profiles remain under
 implementation; CLI login does not fulfill Google verification. See the
 [approved linking proposal](docs/DESKTOP_ACCOUNT_AGENT_LINKING_PROPOSAL.md) and
-[current implementation checkpoint](docs/ACCOUNT_LINKING_PROGRESS.md). The
-`v0.1.0-alpha.3` installers (macOS Apple silicon and Windows x64) include the
-account directory sync, Desktop `AccountPanel` and auto/EN/VI i18n updates from
-`af333ea`.
+[current implementation checkpoint](docs/ACCOUNT_LINKING_PROGRESS.md). The `v0.1.0-alpha.4` installers (macOS Apple silicon and Windows x64) include the
+account directory sync, Desktop `AccountPanel`, and task card / sidebar UX updates from
+`97b1ee3`.
 
 License Hub + user/license/device admin is published at
 [Docker Hub](https://hub.docker.com/r/jtuongdev/agentforge-admin), tag
