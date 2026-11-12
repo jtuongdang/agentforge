@@ -60,7 +60,7 @@ def backup_before_migration() -> Path | None:
     with sqlite3.connect(DB_PATH, timeout=20) as source:
         version = source.execute("PRAGMA user_version").fetchone()[0]
         tables = source.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
-        if version >= 8 or tables == 0:
+        if version >= 9 or tables == 0:
             return None
         backup_dir = DB_PATH.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -175,6 +175,15 @@ def init_db() -> None:
             models TEXT NOT NULL DEFAULT '[]', checked_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS license_cache (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            device_hash TEXT NOT NULL,
+            signed_envelope TEXT NOT NULL,
+            status TEXT NOT NULL,
+            last_server_time TEXT NOT NULL,
+            last_wall_time TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, created_at);
         CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
         """)
@@ -209,7 +218,7 @@ def init_db() -> None:
         for name, declaration in migrations.items():
             if name not in columns:
                 con.execute(f"ALTER TABLE agents ADD COLUMN {name} {declaration}")
-        con.execute("PRAGMA user_version=8")
+        con.execute("PRAGMA user_version=9")
 
 
 def event(task_id: str | None, kind: str, message: str, details: Any = None, agent_id: str | None = None) -> None:

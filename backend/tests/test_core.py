@@ -484,7 +484,7 @@ def test_db_schema_migration_is_versioned_and_backed_up(tmp_path, monkeypatch):
     db.init_db()
 
     with db.connect() as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 9
         assert "base_sha" in {row[1] for row in con.execute("PRAGMA table_info(tasks)")}
     backups = list((tmp_path / "backups").glob("pre-migration-v0-*.sqlite3"))
     assert len(backups) == 1
@@ -913,7 +913,7 @@ def test_provider_schema_upgrade_snapshots_version_five_database(tmp_path, monke
         assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
                            "AND name='provider_connections'").fetchone()[0] == 0
     with db.connect() as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 9
         assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
                            "AND name='provider_connections'").fetchone()[0] == 1
 
@@ -2258,6 +2258,10 @@ def test_checkpoint_export_redacts_credentials_paths_and_disabled_agents(tmp_pat
     assert portability._redact_remote("git@github.com:org/repo.git") == "git@github.com:org/repo.git"
     assert portability._redact_remote("alice@github.com:org/repo.git") == "github.com:org/repo.git"
     repo = _portable_checkpoint_fixture(tmp_path, monkeypatch)
+    with db.transaction() as con:
+        con.execute("INSERT OR REPLACE INTO license_cache(id,device_hash,signed_envelope,status,last_server_time,last_wall_time) "
+                    "VALUES(1,?,?,?,?,?)", ("a" * 64, "portable-entitlement-marker", "trial",
+                    "2026-11-12T11:00:00Z", "2026-11-12T11:00:00Z"))
     (repo / "local-only.txt").write_text("uncommitted but not secret\n", encoding="utf-8")
     target = tmp_path / "fixture.devagent"
 
@@ -2277,7 +2281,8 @@ def test_checkpoint_export_redacts_credentials_paths_and_disabled_agents(tmp_pat
         assert b"user:ghp_" not in all_content
         assert b"[LOCAL_PATH]" not in json.dumps(manifest).encode()
         snapshot = tmp_path / "snapshot.sqlite3"
-        snapshot.write_bytes(archive.read("database.sqlite3"))
+        snapshot_bytes = archive.read("database.sqlite3")
+        snapshot.write_bytes(snapshot_bytes)
     with sqlite3.connect(snapshot) as con:
         assert con.execute("SELECT path,remote,enabled,validation_command FROM repositories WHERE id='repo-a'").fetchone() == (
             "portable://repo-a", "https://github.com/org/repo.git", 0, "[]")
@@ -2286,6 +2291,8 @@ def test_checkpoint_export_redacts_credentials_paths_and_disabled_agents(tmp_pat
         assert con.execute("SELECT COUNT(*) FROM system_settings WHERE key='provider.api_token'").fetchone()[0] == 0
         assert con.execute("SELECT secret_ref,state,models,checked_at FROM provider_connections WHERE id='provider-a'").fetchone() == (
             None, "unavailable", "[]", None)
+        assert con.execute("SELECT COUNT(*) FROM license_cache").fetchone()[0] == 0
+        assert b"portable-entitlement-marker" not in snapshot_bytes
 
 
 def test_checkpoint_includes_explicit_safe_uncommitted_files_and_rejects_secrets(tmp_path, monkeypatch):
@@ -2755,7 +2762,7 @@ def test_schema_v7_migration_backs_up_before_remote_tables(tmp_path, monkeypatch
         assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='remote_devices'").fetchone()[0] == 0
     with db.connect() as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 9
         assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='remote_devices'").fetchone()[0] == 1
 
 

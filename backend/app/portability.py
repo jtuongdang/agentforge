@@ -299,6 +299,9 @@ def _scrub_snapshot_database(path: Path) -> None:
         con.execute("DELETE FROM system_settings WHERE key NOT LIKE 'fleet.%'")
         con.execute("DELETE FROM credential_cooldowns")
         con.execute("DELETE FROM lead_lease")
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='license_cache'").fetchone():
+            # Entitlements are device-bound and must be fetched again after restore.
+            con.execute("DELETE FROM license_cache")
         if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lead_sessions'").fetchone():
             con.execute("UPDATE lead_sessions SET state='revoked',revoked_at=COALESCE(revoked_at,CURRENT_TIMESTAMP)")
         _clear_remote_access(con)
