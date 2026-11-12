@@ -14,8 +14,10 @@ dotnet test license-hub.tests/LicenseHub.Tests.csproj -m:1
 
 The hub needs a MongoDB instance and secrets to start. Do not add them to this
 repository or paste them into chat. The application has passed integration
-tests against a temporary local MongoDB, but has not been deployed to or
-exercised against an external/production MongoDB service.
+tests against a temporary local MongoDB and an isolated synthetic database on
+MongoDB Atlas. A configured local staging hub has also passed startup/health
+checks. Production HTTPS deployment and the desktop release public-key pin
+remain unaccepted; the Atlas test does not establish production readiness.
 
 For local tests, start a MongoDB process bound only to `127.0.0.1`, copy
 `.env.example` to `.env`, replace its placeholders with disposable test values,

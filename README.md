@@ -78,4 +78,4 @@ selection, checksum verification, first launch and backup instructions.
 - The dashboard's **Storage** page shows SQLite/WAL size, worktree/build usage, managed data totals, record counts and free disk space. It refreshes when opened and every 30 seconds; it is read-only and does not clean up data automatically.
 - Before each Agent run, the Orchestrator injects [PROJECT_CONVENTIONS.md](docs/PROJECT_CONVENTIONS.md) and reads repository `AGENTS.md`/guidance files plus scoped ancestor instructions; the task package lists them and requires the Agent to report them.
 
-See the [completion roadmap](docs/COMPLETION_ROADMAP.md), the [Desktop upgrade plan](docs/DESKTOP_UPGRADE_PLAN.md), and the [project conventions](docs/PROJECT_CONVENTIONS.md).
+See the [current functionality audit](docs/FUNCTIONALITY_AUDIT.md) for implemented features, verification evidence and remaining limitations. Planning history is in the [completion roadmap](docs/COMPLETION_ROADMAP.md) and [Desktop upgrade plan](docs/DESKTOP_UPGRADE_PLAN.md); development guidance is in [project conventions](docs/PROJECT_CONVENTIONS.md).
