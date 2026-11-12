@@ -24,6 +24,20 @@ class AgentLogin:
 
     @staticmethod
     def command(provider: str) -> list[str]:
+        if provider == "antigravity":
+            executable = shutil.which("agy")
+            if not executable:
+                candidate = os.path.expanduser("~/.local/bin/agy")
+                if os.path.isfile(candidate):
+                    executable = candidate
+            if executable:
+                return [
+                    executable, "--print", "/usage", "--output-format", "json",
+                    "--print-timeout", "30s", "--mode=accept-edits", "--sandbox",
+                ]
+            if os.path.exists("/Applications/Antigravity.app"):
+                return ["open", "-a", "/Applications/Antigravity.app"]
+            raise ValueError("Install Antigravity app or CLI before starting login")
         commands = {
             "codex": ["codex", "-c", 'cli_auth_credentials_store="keyring"', "login"],
             "copilot": ["copilot", "login", "--web-flow"],

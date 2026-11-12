@@ -12,6 +12,35 @@ BACKEND_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(BACKEND_ROOT))
 
 
+DEFAULT_HUB_URL = "https://agentforge-admin-0-1-0-admin-1.onrender.com"
+DEFAULT_LICENSE_PUBLIC_KEY_PEM = """-----BEGIN PUBLIC KEY-----
+MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA1WA1w1ey351AHfXM0YjB
+xhJTSXKkuzWbWQt8j8zIlhkm6+NrNdb3yGKORfGC9YtBLjHW3WHme842/40iz9XE
+PnRC3H6kMaE0yRuHf+PS5EwxuMkKyI41g7hMGlgKzzjYIzRkwjO1XG/PD5QAAULP
+UOWmZCiUwtp/GoeXwXkP6V4kiVuGyXaJG0nF4kwN3tjeb66zfKQLsMrmFNOuSc/u
+JF0x8TKA11o5iNj+fZLmwx8cDnZJgfjEDnLee6+IunCZzJkTraqTT6CwESixkqcS
+Aw/O1hBH+fepQMenk7BNPIJcZRO9coxWG//HXwYekghYVmjSQdg2DNnK6djekQnS
+YRHYJMyabE0rOkN8uLaXRqa97VUFw4bHtbklRuXMBzFKSvQLQ+/nzSuVAALbVHlD
+ADUL7bHWc8scj7YQI2F7usM7qZmM7bdSPt3xqF410wChd0MOtbde1bEcx1snNSi6
+BzIkkMFd3ZlsoU80SsLwgH4bkMLde5kHWwaLAHiOWQtpAgMBAAE=
+-----END PUBLIC KEY-----
+"""
+
+
+def _ensure_default_hub_env() -> None:
+    from app.settings import default_data_dir
+
+    os.environ.setdefault("CLINIC_ORCHESTRATOR_ACCOUNT_HUB_URL", DEFAULT_HUB_URL)
+    os.environ.setdefault("CLINIC_ORCHESTRATOR_LICENSE_HUB_URL", DEFAULT_HUB_URL)
+    if not os.getenv("CLINIC_ORCHESTRATOR_LICENSE_PUBLIC_KEY_FILE"):
+        data_dir = default_data_dir()
+        data_dir.mkdir(parents=True, exist_ok=True)
+        key_path = data_dir / "license-public.pem"
+        if not key_path.is_file():
+            key_path.write_text(DEFAULT_LICENSE_PUBLIC_KEY_PEM, encoding="utf-8")
+        os.environ["CLINIC_ORCHESTRATOR_LICENSE_PUBLIC_KEY_FILE"] = str(key_path)
+
+
 def dashboard_dist_for_entrypoint(entrypoint: str | Path, *, compiled_onefile: bool) -> Path:
     """Find data embedded beside Nuitka's extracted entrypoint, or the repo copy in development."""
     entrypoint_dir = Path(entrypoint).resolve().parent
@@ -20,6 +49,7 @@ def dashboard_dist_for_entrypoint(entrypoint: str | Path, *, compiled_onefile: b
 
 
 async def serve() -> None:
+    _ensure_default_hub_env()
     import uvicorn
     from app.remote_pairing import remote_boundary_enabled
 
