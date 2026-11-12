@@ -283,6 +283,8 @@ def _clear_remote_access(con: sqlite3.Connection) -> None:
 def _scrub_snapshot_database(path: Path) -> None:
     with closing(sqlite3.connect(path)) as con:
         con.execute("PRAGMA foreign_keys=ON")
+        # Replaced paths/secrets must not survive in free SQLite pages in the exported file.
+        con.execute("PRAGMA secure_delete=ON")
         local_paths = [row[0] for row in con.execute("SELECT path FROM repositories").fetchall()]
         local_paths.extend(row[0] for row in con.execute("SELECT worktree FROM tasks WHERE worktree IS NOT NULL").fetchall())
         local_paths.extend([str(db.DB_PATH.parent), str(db.DATA_ROOT), str(Path.home())])
@@ -319,6 +321,7 @@ def _scrub_snapshot_database(path: Path) -> None:
                                 f"WHERE typeof({quoted_column})='text' AND instr({quoted_column},?)>0",
                                 (local_path, "[LOCAL_PATH]", local_path))
         con.commit()
+        con.execute("VACUUM")
         for table in tables:
             quoted_table = '"' + table.replace('"', '""') + '"'
             text_columns = [row[1] for row in con.execute(f"PRAGMA table_info({quoted_table})") if row[2].upper() in {"TEXT", ""}]
