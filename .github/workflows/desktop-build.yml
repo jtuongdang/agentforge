@@ -45,6 +45,10 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements*.txt
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: dashboard/src-tauri -> target
+          shared-key: desktop-x86_64-apple-darwin
       - run: npm ci
         working-directory: dashboard
       - run: npm run tauri -- build --bundles app
@@ -84,6 +88,10 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements*.txt
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: dashboard/src-tauri -> target
+          shared-key: desktop-x86_64-pc-windows-msvc
       - run: npm ci
         working-directory: dashboard
       - run: npm run tauri -- build
@@ -125,6 +133,10 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements*.txt
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: dashboard/src-tauri -> target
+          shared-key: desktop-aarch64-apple-darwin
       - run: npm ci
         working-directory: dashboard
       - run: npm run tauri -- build --bundles app
