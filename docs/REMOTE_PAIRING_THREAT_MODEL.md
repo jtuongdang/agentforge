@@ -60,6 +60,7 @@ Use a private VPN path with HTTPS ingress on the same desktop host, reverse-prox
 
 ## Implementation acceptance still pending
 
+- An operator-facing Nginx template is available in [`REMOTE_INGRESS.md`](REMOTE_INGRESS.md); its VPN interface/CIDR, certificate, hostname, and log policy are placeholders and must be configured and reviewed for the deployment.
 - The operator must configure a concrete VPN/HTTPS ingress origin, certificate, route allowlist, and local proxy peer IP before the optional gateway can start.
 - Validate the browser flow on two devices through that VPN and verify the owner API is unreachable from the second device.
 - Review remote UI behavior, cert renewal, lost-device recovery, and reverse-proxy access-log settings in the deployed ingress.
