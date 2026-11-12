@@ -191,7 +191,7 @@ def main() -> int:
             ingress_headers = {"Host": "remote.example.invalid", "X-Forwarded-Proto": "https"}
             with urlopen(Request(f"http://127.0.0.1:{gateway_port}/remote", headers=ingress_headers), timeout=5) as response:
                 remote_html = response.read().decode("utf-8")
-                if response.status != 200 or "DevAgent Remote Review" not in remote_html:
+                if response.status != 200 or 'src="/remote/assets/' not in remote_html:
                     raise RuntimeError("Packaged remote browser viewer did not load from the gateway")
             if 'href="/remote/assets/favicon.svg"' not in remote_html:
                 raise RuntimeError("Remote viewer HTML does not route its favicon through the allowed prefix")
@@ -204,7 +204,8 @@ def main() -> int:
                 raise RuntimeError("Remote viewer HTML does not reference gateway-scoped assets")
             with urlopen(Request(f"http://127.0.0.1:{gateway_port}/remote/assets/{asset.group(1)}",
                                  headers=ingress_headers), timeout=5) as response:
-                if response.status != 200 or not response.read(64):
+                asset_content = response.read()
+                if response.status != 200 or b"DevAgent Remote Review" not in asset_content:
                     raise RuntimeError("Packaged remote viewer asset did not load")
             try:
                 urlopen(Request(f"http://127.0.0.1:{gateway_port}/api/fleet",
