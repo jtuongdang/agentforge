@@ -67,7 +67,7 @@ jobs:
   windows:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'windows' }}
     name: x86_64-pc-windows-msvc
-    runs-on: windows-latest
+    runs-on: windows-2022
     env:
       NUITKA_BUILD_JOBS: 2
       CARGO_BUILD_JOBS: 2
