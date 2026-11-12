@@ -8,3 +8,11 @@ dashboard/src-tauri/binaries/
 __pycache__/
 .pytest_cache/
 *.py[cod]
+**/bin/
+**/obj/
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example

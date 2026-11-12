@@ -25,6 +25,7 @@ from . import portability
 from . import providers
 from . import tech_lead
 from . import remote_pairing
+from .license import LicenseConsentRequired, LicenseUnavailable, license_service
 from .engine import get_task, log_event, set_task
 from . import fleet as fleet_manager
 from .git_ops import (changed_paths, check_repository_sync, is_github_remote, list_repository_branches,
@@ -32,6 +33,7 @@ from .git_ops import (changed_paths, check_repository_sync, is_github_remote, li
                       validated_revision_is_current)
 from .models import (AgentCreate, CompleteHandoff, ContractCreate, FleetSettingsUpdate, LeadHandshake,
                      LeadPairingCreate, LeadReview, ProjectCheckpointCreate, ProjectCheckpointRestore,
+                     LicenseActivation,
                      ProviderConnectionCreate, ProviderConnectionUpdate,
                      RemoteDiffGrant, RemotePairingPoll, RemotePairingRequest, RemoteWsTicketRequest,
                      RepositoryCreate, RepositoryPreflight, TaskCreate)
@@ -155,10 +157,12 @@ def reconcile_interrupted_tasks() -> None:
 async def lifespan(_: FastAPI):
     bootstrap()
     worker = asyncio.create_task(orchestrator.start())
+    license_worker = asyncio.create_task(license_service.refresh_loop())
     yield
     await orchestrator.stop()
     worker.cancel()
-    await asyncio.gather(worker, return_exceptions=True)
+    license_worker.cancel()
+    await asyncio.gather(worker, license_worker, return_exceptions=True)
 
 
 app = FastAPI(title="DevAgent Orchestrator", version="0.1.0", lifespan=lifespan)
@@ -583,6 +587,52 @@ def health():
     except Exception as exc:
         return {"ok": False, "database": {"ok": False, "check": type(exc).__name__},
                 "scheduler_active": not scheduler._stopping}
+
+
+@app.get("/api/license")
+def license_status():
+    return license_service.status()
+
+
+@app.post("/api/license/consent")
+async def consent_and_start_trial():
+    license_service.grant_consent()
+    try:
+        return await asyncio.to_thread(license_service.refresh)
+    except LicenseUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/api/license/refresh")
+async def refresh_license():
+    try:
+        return await asyncio.to_thread(license_service.refresh)
+    except LicenseUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/api/license/activate")
+async def activate_license(body: LicenseActivation):
+    try:
+        return await asyncio.to_thread(license_service.activate, body.license_key.get_secret_value())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except LicenseConsentRequired as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except LicenseUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/api/license/deactivate")
+async def deactivate_license(body: LicenseActivation):
+    try:
+        return await asyncio.to_thread(license_service.deactivate, body.license_key.get_secret_value())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except LicenseConsentRequired as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except LicenseUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @app.get("/api/storage")

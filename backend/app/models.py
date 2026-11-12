@@ -87,6 +87,10 @@ class ProviderConnectionUpdate(BaseModel):
         return value
 
 
+class LicenseActivation(BaseModel):
+    license_key: SecretStr = Field(min_length=1, max_length=256)
+
+
 class ContractCreate(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     body: str = Field(min_length=10, max_length=30000)

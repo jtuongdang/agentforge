@@ -55,6 +55,7 @@ type RemoteDevice = { id:string; client_id:string; client_name:string; state:str
 type RemoteRequest = { id:string; client_id:string; client_name:string; created_at:string; expires_at:string; state:string }
 type RemoteStatus = { enabled:boolean; origin:string|null; gateway:string|null; transport:string; devices:RemoteDevice[]; pending_requests:RemoteRequest[] }
 type RemoteInvite = { invite_id:string; pairing_code:string; expires_at:string; scopes:string[]; transport:string }
+type LicenseStatus = { required:boolean; configured:boolean; status:string; ai_execution:boolean; local_read:boolean; local_export:boolean; days_remaining:number|null; expires_at?:string|null; tier?:string|null }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const token = await getApiToken()
@@ -405,6 +406,7 @@ function App() {
           {nav === 'Contracts' && <button className="button primary" onClick={() => setShowContractForm(true)}><span>＋</span> Propose contract</button>}
         </div>
         {nav === 'Overview' && <>
+          <LicensePanel/>
           {repos.length === 0 && <section className="setup-wizard panel"><div><div className="eyebrow">FIRST RUN · STEP 1 OF 3</div><h2>Connect a project repository</h2><p>Choose a local Git checkout, review its base branch and validation setup, then add an Agent before scheduling your first task.</p></div><div className="setup-steps"><span className="current">1 · Repository</span><span>2 · Validation</span><span>3 · Agent</span></div><div className="setup-actions"><button className="button primary" onClick={() => setShowRepoForm(true)}>Choose repository</button><button className="button secondary" onClick={async () => { try { await api('/agents/refresh', { method: 'POST' }); await refresh() } catch (e) { setError(String(e)) } }}>Detect Agent CLIs</button></div></section>}
           <section className="stat-grid">
             <StatCard label="Active tasks" value={counts.active} note="Executing in isolated worktrees" icon="◷" tone="blue"/>
@@ -418,7 +420,7 @@ function App() {
             <div className="panel"><div className="panel-heading"><div><h2>Registered repositories</h2><p>Isolated worktree roots</p></div><div className="panel-buttons"><span className="count-pill">{repos.length}</span><button className="button secondary" onClick={() => setShowRepoForm(true)}>＋ Add repository</button></div></div>{repos.map(repo => <div className="repo-row" key={repo.id}><div className="repo-icon">⌘</div><div className="repo-info"><b>{repo.name}</b><small>{repo.path}</small></div><span className="branch-pill">{repo.default_branch}</span><span className="branch-pill">{repo.validation_profile.toUpperCase()} CHECK</span></div>)}</div></section>
         </>}
         {nav === 'Tasks' && <><div className="filter-row"><span className="filter-summary">{tasks.length} tasks total</span><span className="spacer"/><span className="hint">Select a task to inspect logs and validation.</span></div><TaskTable tasks={tasks} onSelect={setSelected} selectedId={selected?.id}/>{selected && <TaskInspector task={selected} tasks={tasks} events={events} onApprove={() => setApproval(selected)} onCompleteLocal={() => void completeLocally(selected)} onCancel={() => void cancel(selected)} onHandoff={() => void handoff(selected)}/>}</>}
-      {nav === 'Agents' && <><div className="panel"><div className="panel-heading"><div><h2>Registered agents</h2><p>Kiểm tra trạng thái xác thực và gỡ Agent khỏi lịch phân công.</p></div><div className="panel-buttons"><button className="button secondary" onClick={async () => { try { await api('/agents/refresh', { method: 'POST' }); await refresh() } catch (e) { setError(String(e)) } }}>Refresh detection</button><button className="button secondary" onClick={() => setShowAgentForm(true)}>＋ Register adapter</button></div></div><AgentList agents={agents} detailed busyAgentId={busyAgentId} onCheckToken={checkAgentToken} onRemove={removeAgent} onRestore={restoreAgent}/></div><ProviderConnections/></>}
+      {nav === 'Agents' && <><LicensePanel/><div className="panel"><div className="panel-heading"><div><h2>Registered agents</h2><p>Kiểm tra trạng thái xác thực và gỡ Agent khỏi lịch phân công.</p></div><div className="panel-buttons"><button className="button secondary" onClick={async () => { try { await api('/agents/refresh', { method: 'POST' }); await refresh() } catch (e) { setError(String(e)) } }}>Refresh detection</button><button className="button secondary" onClick={() => setShowAgentForm(true)}>＋ Register adapter</button></div></div><AgentList agents={agents} detailed busyAgentId={busyAgentId} onCheckToken={checkAgentToken} onRemove={removeAgent} onRestore={restoreAgent}/></div><ProviderConnections/></>}
         {nav === 'Contracts' && <div className="panel"><div className="panel-heading"><div><h2>Shared interfaces</h2><p>Approve contracts before dependent tasks can execute.</p></div></div>{contracts.length ? contracts.map(c => <div className="contract-row" key={c.id}><div className="contract-icon">⌘</div><div className="contract-content"><div><b>{c.title}</b><span className={`badge ${c.state === 'approved' ? 'success' : 'warning'}`}>{c.state}</span></div><p>{c.body}</p><small>v{c.version} · {c.id}</small></div>{c.state === 'proposed' && <button className="button secondary" onClick={() => void approveContract(c.id)}>Approve contract</button>}</div>) : <Empty title="No interface contracts" text="Propose shared API or data decisions before scheduling dependent work."/>}</div>}
         {nav === 'History' && <History tasks={tasks.filter(t => ['draft_pr', 'completed', 'failed', 'blocked', 'cancelled'].includes(t.status))} onSelect={setSelected}/>}
         {nav === 'Storage' && <StoragePage metrics={storage} error={storageError} busy={storageBusy} onRefresh={() => void refreshStorage()}/>}
@@ -635,6 +637,67 @@ function ProviderConnections() {
         {item.models.length>0 && <div className="chips">{item.models.slice(0,12).map(model=><button className="button secondary" type="button" key={model} onClick={()=>void chooseModel(item,model)}>{model===item.model?`✓ ${model}`:model}</button>)}</div>}
       </div><div className="agent-actions"><button className="button secondary" type="button" disabled={busy} onClick={()=>void check(item.id)}>Check models</button><button className="button danger-outline" type="button" disabled={busy} onClick={()=>void remove(item)}>Remove</button></div>
     </div>)}</div> : <Empty title="No provider connections" text="Add an API provider or a local Ollama service to check available models."/>}
+  </section>
+}
+
+function LicensePanel() {
+  const [license, setLicense] = useState<LicenseStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const load = useCallback(async () => { setLicense(await api<LicenseStatus>('/license')) }, [])
+  useEffect(() => {
+    void load().catch(error => setMessage(error instanceof Error ? error.message : 'Could not load license status'))
+    const timer = window.setInterval(() => { void load().catch(() => undefined) }, 30000)
+    return () => window.clearInterval(timer)
+  }, [load])
+  const refresh = async () => {
+    setBusy(true); setMessage('')
+    try { setLicense(await api<LicenseStatus>('/license/refresh', { method: 'POST' })); setMessage('License status refreshed.') }
+    catch (error) { setMessage(error instanceof Error ? error.message : 'Could not refresh license') }
+    finally { setBusy(false) }
+  }
+  const consent = async () => {
+    setBusy(true); setMessage('')
+    try { setLicense(await api<LicenseStatus>('/license/consent', { method: 'POST' })); setMessage('Privacy notice acknowledged. The hub received only the one-way device hash.') }
+    catch (error) { setMessage(error instanceof Error ? error.message : 'Could not start the device trial') }
+    finally { setBusy(false) }
+  }
+  const activate = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const form = event.currentTarget
+    const key = new FormData(form).get('license_key')
+    if (typeof key !== 'string') return
+    setBusy(true); setMessage('')
+    try {
+      setLicense(await api<LicenseStatus>('/license/activate', { method: 'POST', body: JSON.stringify({ license_key: key }) }))
+      form.reset(); setMessage('License activated. The key was not saved on this device.')
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Could not activate license') }
+    finally { setBusy(false) }
+  }
+  const deactivate = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!window.confirm('Release this device from the license so it can be moved elsewhere? This does not erase project data or restart the trial.')) return
+    const form = event.currentTarget
+    const key = new FormData(form).get('license_key')
+    if (typeof key !== 'string') return
+    setBusy(true); setMessage('')
+    try {
+      setLicense(await api<LicenseStatus>('/license/deactivate', { method: 'POST', body: JSON.stringify({ license_key: key }) }))
+      form.reset(); setMessage('This device was released. Local projects and the original trial period are unchanged.')
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Could not release this device') }
+    finally { setBusy(false) }
+  }
+  const label = license?.status.replaceAll('_', ' ') || 'checking'
+  if (license && !license.configured && !license.required) return null
+  return <section className="panel license-panel">
+    <div className="panel-heading"><div><h2>License & trial</h2><p>AI execution is controlled by a signed, device-bound entitlement. Local projects remain readable and exportable.</p></div><span className={`agent-state ${license?.ai_execution ? 'available' : 'disabled'}`}>{label.toUpperCase()}</span></div>
+    {license && <div className="license-summary"><span>AI execution <b>{license.ai_execution ? 'enabled' : 'paused'}</b></span>{license.days_remaining !== null && <span>Days remaining <b>{license.days_remaining}</b></span>}{license.tier && <span>Plan <b>{license.tier}</b></span>}</div>}
+    {license?.status === 'trial_pending' && <p className="license-note">The 14-day device trial starts when the license hub issues the first signed entitlement.</p>}
+    {license && !license.configured && license.required && <p className="storage-alert warning">The license hub is required but is not configured. Agent dispatch is paused.</p>}
+    {license?.configured && license.status === 'consent_required' && <div className="license-consent"><p>To start the 14-day trial or activate a license, this app sends a one-way device identifier hash to the license hub. It does not send source code, prompts, project files, email, or OS details. The trial is tied to this device.</p><button className="button primary" disabled={busy} onClick={() => void consent()}>{busy ? 'Starting…' : 'Agree and start device trial'}</button></div>}
+    {license?.configured && license.status !== 'consent_required' && <div className="license-actions"><form className="license-form" onSubmit={activate}><label>License key<input name="license_key" type="password" autoComplete="off" required minLength={1} maxLength={256} placeholder="Enter activation key"/></label><button className="button primary" disabled={busy}>{busy ? 'Working…' : 'Activate license'}</button></form><button className="button secondary" disabled={busy} onClick={() => void refresh()}>{busy ? 'Checking…' : 'Refresh status'}</button></div>}
+    {license?.status === 'active' && <form className="license-deactivate" onSubmit={deactivate}><label>Release this device<input name="license_key" type="password" autoComplete="off" required minLength={1} maxLength={256} placeholder="Re-enter license key"/></label><button className="button danger-outline" disabled={busy}>{busy ? 'Releasing…' : 'Deactivate on this device'}</button></form>}
+    {message && <p className="muted" role="status">{message}</p>}
   </section>
 }
 

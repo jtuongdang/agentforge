@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 
 from . import db
+from .license import license_service
 from .engine import AgentExecutionEngine, get_task, log_event, redact, set_task
 from .fleet import (cooldown_remaining, credential_id, credential_key, disk_free_bytes,
                     settings as fleet_settings)
@@ -32,6 +33,8 @@ class TaskScheduler:
         while not self._stopping:
             try:
                 for candidate in self._queued_tasks():
+                    if not license_service.dispatch_allowed():
+                        break
                     async with self._lock:
                         if candidate["id"] in self.active:
                             continue
@@ -81,6 +84,8 @@ class TaskScheduler:
     @staticmethod
     def _claim_task(task_id: str, agent: dict | None = None) -> bool:
         """Atomically reserve global run, disk and credential budget across schedulers."""
+        if not license_service.dispatch_allowed():
+            return False
         free_disk = disk_free_bytes()
         active_states = ("planning", "assigned", "running", "validating", "recovering", "publishing")
         marks = ",".join("?" for _ in active_states)

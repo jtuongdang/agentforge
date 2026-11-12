@@ -1460,6 +1460,35 @@ def test_scheduler_reserves_disk_before_claiming_new_run(tmp_path, monkeypatch):
         assert con.execute("SELECT status FROM tasks WHERE id='queued'").fetchone()[0] == "queued"
 
 
+def test_scheduler_keeps_task_queued_when_license_disallows_ai_dispatch(tmp_path, monkeypatch):
+    from app.scheduler import TaskScheduler
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "license-gate.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('repo','Fixture',?)", (str(tmp_path),))
+        con.execute("INSERT INTO tasks(id,title,objective,repository_id,file_globs) "
+                    "VALUES('queued','Queued task','Do not lose this queued task','repo','[\"**/*\"]')")
+    monkeypatch.setattr("app.scheduler.license_service.dispatch_allowed", lambda: False)
+
+    assert TaskScheduler._claim_task("queued") is False
+    with db.connect() as con:
+        assert con.execute("SELECT status FROM tasks WHERE id='queued'").fetchone()[0] == "queued"
+
+
+def test_license_status_api_returns_policy_without_credentials(monkeypatch):
+    monkeypatch.setattr("app.main.license_service.status", lambda: {
+        "required": True, "configured": True, "status": "trial", "ai_execution": True,
+        "local_read": True, "local_export": True, "days_remaining": 10,
+    })
+    with authenticated_test_client(monkeypatch) as client:
+        response = client.get("/api/license")
+    assert response.status_code == 200
+    assert response.json()["status"] == "trial"
+    assert "license_key" not in response.json()
+
+
 def test_build_slots_hot_apply_capacity_without_releasing_active_build(tmp_path, monkeypatch):
     import asyncio
     from app import fleet
