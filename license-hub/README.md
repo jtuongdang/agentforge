@@ -138,3 +138,24 @@ deployment, or production license records. Validate trial creation/expiry,
 concurrent activation limits, deactivation, revocation, MongoDB failure
 recovery, and the desktop public-key pin against an isolated staging database
 before enabling it for users.
+
+## Google broker source upgrade (G2)
+
+The source now includes an opt-in Google OIDC broker, PKCE one-time Desktop
+handoff, hashed app sessions with refresh rotation/revocation, and explicit
+administrator approval for existing profiles. It is disabled by default and
+is not included in the published `0.1.0-admin.1` image. Read
+[Google setup and remaining acceptance gates](../docs/GOOGLE_AUTH_SETUP.md).
+Desktop Account/profile and license-binding enforcement (G3) remain open.
+
+Tests use a fake OIDC issuer/backchannel and isolated synthetic MongoDB databases.
+With a dedicated local MongoDB running, enable the two optional integration tests:
+
+```sh
+LICENSE_HUB_TEST_MONGO_URI='mongodb://127.0.0.1:27018/?directConnection=true' \
+  nice -n 10 dotnet test license-hub.tests/LicenseHub.Tests.csproj -m:1 -p:UseSharedCompilation=false
+```
+
+No Google credential or external request is needed for these tests. Each test
+creates and removes only its own randomly named synthetic database. Without
+the test MongoDB setting, these integration tests are reported as skipped.

@@ -19,7 +19,7 @@ thành công, worker có ranh giới file/tool, và tài khoản AgentForge đã
 |---|---|---|
 | Admin Docker | Admin web quản trị user/license/device; token trong RAM; khóa/mở user; image amd64/arm64 đã publish và inspect registry | Người vận hành deploy HTTPS; admin profile hiện chưa phải Google identity |
 | G1 · Kết nối CLI | Panel Overview lần đầu + Agents; official Codex/Copilot/GitHub browser login, timeout/cancel/cleanup process tree; không lưu raw output; mã GitHub tạm thời; check OS store/env override/capability; discovery không suy ra Copilot/Antigravity đã login | Nghiệm thu browser login thật trên từng OS/CLI, trạng thái quota/policy thực; hoàn thiện scoped-tool/sandbox Copilot. Worker Copilot tạm dừng, đã gỡ `--allow-all-tools` |
-| G2 · Google broker | Phương án đã duyệt; nguồn chính thức Google OIDC và ASP.NET OIDC đã đối chiếu | Viết broker + transaction/PKCE + identity/session/rotation/invite; validate bằng fake issuer rồi Google HTTPS thật. Chưa có server HTTPS/OAuth client cấu hình |
+| G2 · Google broker | Có source OIDC middleware, transaction S256/one-time code, identity theo sub, session hash/rotation/revoke, API approval hồ sơ cũ; fake issuer + Mongo fixture đã kiểm thử | Google thật đang kiểm thử; Web Client local đúng callback đã tạo, credential lưu riêng ngoài repo, Hub Development đã ready. Còn admin web cho identity approval và HTTPS/client production |
 | G3 · Account Desktop | Đã có OS keychain infrastructure và profile activation/backup nền | Loopback handoff, keychain phiên AgentForge, UI Account, profile theo user, nhận dữ liệu legacy có backup, license-owner binding, login gate khi dispatch |
 | G4 · E2E | Test fixture local và browser UI đã chạy | Máy sạch: Google → CLI → task → validation → diff → complete/restart/offline/revoke, Windows + macOS; không mở prompt trả phí ngầm |
 | G5 · Phát hành mới | Alpha.1 cũ đã có 4 installer + checksums; Docker admin.1 đã có | Sau G2–G4 pass: image có broker + Desktop alpha mới pin Hub/public key; ký số/notarization cần chứng thư riêng |
@@ -41,12 +41,35 @@ thành công, worker có ranh giới file/tool, và tài khoản AgentForge đã
   `sha256:55c681c07c43d384b57bcd043f31c7b5a97a4725c1c51ffa780eee0c04c34782`.
   Chi tiết chạy container: [deploy guide](../deploy/license-hub/README.md).
 
+## Bổ sung G2 — sau mốc CLI d6ee25c
+
+Broker mặc định tắt; cấu hình source xem [GOOGLE_AUTH_SETUP.md](GOOGLE_AUTH_SETUP.md).
+Build .NET pass, không warning/error. Suite .NET chạy với MongoDB local tách biệt:
+**20 passed**, khoảng 1 giây (không tính build/start Mongo). Có middleware OIDC
+thật với fake issuer/backchannel: sai chữ ký, issuer, audience, expiry, nonce,
+state và email_verified đều bị chặn; flow hợp lệ đổi mã bằng PKCE rồi logout.
+Store integration kiểm tra replay/expiry/device mismatch, refresh rotation/reuse,
+disabled user và không auto-merge email; không sửa trial device trong luồng auth.
+License integration hiện hữu chạy lại **2 passed**, 2.67 giây.
+
+Cấu hình Google Cloud consent AgentForge External/Testing đã lưu. Web Client
+local đã tạo, callback HTTP loopback chỉ dùng Development. Secret đầu tiên xuất
+hiện trong kết quả đọc UI; client đó đã không còn trong danh sách hoạt động.
+Client Web mới đúng loại đã tạo, JSON được chuyển ngoài repo với quyền 0600;
+`.env` ignored đã cập nhật, Hub trả `/ready` 200 và `google_enabled=true`.
+Tài khoản operator đã tới màn hình Google consent; chưa ghi nhận E2E pass tại
+thời điểm cập nhật này. Không đưa secret/client JSON vào Git.
+
+G3 chưa có: broker hiện chưa enforce Google identity lên mọi device/license API
+hoặc dispatch, chưa có Account UI/profile separation. Image admin.1 và installer
+alpha.1 không chứa các thay đổi G2 này.
+
 ## Thứ tự công việc tiếp theo
 
-1. Broker Google với OIDC middleware được duy trì, scope `openid email profile`;
-   state/nonce/audience/issuer/expiry/email_verified, PKCE và mã một lần TTL ngắn.
-2. Identity theo provider/sub, admin invite/approval cho hồ sơ cũ; session hash,
-   refresh rotation/revoke, disabled-user checks. Không tự merge chỉ theo email.
+1. Hoàn tất credential local đã thay secret, thử Google OIDC thật; sau đó Hub
+   HTTPS/client production riêng. Thêm admin UI cho identity approval.
+2. Bổ sung audit đăng nhập/liên kết/thu hồi và kiểm tra vận hành session/approval
+   qua admin UI; giữ identity theo provider/sub và không tự merge theo email.
 3. Desktop loopback handoff + keychain + profile isolation và license binding;
    trial thiết bị 14 ngày giữ nguyên, local read/export vẫn dùng được.
 4. Copilot scoped tool/file policy, chặn push/merge và kiểm thử vượt quyền trước

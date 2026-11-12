@@ -38,6 +38,7 @@ if (pepper.Length < 32 || adminToken.Length < 32)
 
 var mongoClient = new MongoClient(mongoUri);
 var database = mongoClient.GetDatabase(databaseName);
+var googleAuth = GoogleAuth.Configure(builder, database);
 var devices = database.GetCollection<DeviceDocument>("devices");
 var licenses = database.GetCollection<LicenseDocument>("licenses");
 var users = database.GetCollection<UserDocument>("users");
@@ -239,6 +240,7 @@ app.MapPost("/api/v1/admin/licenses/{id}/revoke", async (string id, HttpRequest 
 });
 
 AdminEndpoints.Map(app, users, licenses, devices, request => AdminAuthorized(request, adminToken));
+await GoogleAuth.Map(app, googleAuth, request => AdminAuthorized(request, adminToken));
 app.Run();
 
 async Task<bool> UserEnabled(string? userId, CancellationToken cancellationToken)
