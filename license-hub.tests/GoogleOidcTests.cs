@@ -91,6 +91,7 @@ public sealed class GoogleOidcTests
             {
                 using var failed = await Login(variant);
                 Assert.Equal(HttpStatusCode.BadRequest, failed.StatusCode);
+                Assert.Equal("text/plain", failed.Content.Headers.ContentType!.MediaType);
                 Assert.Equal("no-store", failed.Headers.CacheControl!.ToString());
                 Assert.Null(failed.Headers.Location);
             }

@@ -94,12 +94,14 @@ public static class GoogleAuth
                     catch (Exception ex) when (ex is InvalidOperationException or MongoException)
                     {
                         context.Response.StatusCode = 400;
+                        context.Response.ContentType = "text/plain; charset=utf-8";
                         await context.Response.WriteAsync("Sign-in could not be completed. Return to Desktop and start again.");
                     }
                 };
                 options.Events.OnRemoteFailure = async context => {
                     context.HandleResponse();
                     context.Response.StatusCode = 400;
+                    context.Response.ContentType = "text/plain; charset=utf-8";
                     await context.Response.WriteAsync("Google sign-in was rejected or expired. Return to Desktop and start again.");
                 };
             });

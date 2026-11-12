@@ -85,7 +85,9 @@ Admin web để xử lý các yêu cầu này đang được bổ sung; API đã
 
 ## Cổng nghiệm thu còn mở
 
-- Google login thật bằng client local/secret hiện hành, không dùng secret cũ.
+- Google login thật bằng client local/secret hiện hành đã pass ngày 12/11/2026:
+  OIDC → PKCE handoff → session → refresh rotation → logout/revocation. Thử qua
+  harness Development; chưa nghiệm thu Account UI/Desktop installer.
 - Hub HTTPS thật và client production riêng.
 - Desktop loopback/Account UI/keychain/profile isolation/legacy backup và binding
   license với user đã xác minh; trial theo thiết bị vẫn 14 ngày.
