@@ -94,6 +94,7 @@ class LicenseActivation(BaseModel):
 class ContractCreate(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     body: str = Field(min_length=10, max_length=30000)
+    repository_id: str | None = None
 
 
 class TaskCreate(BaseModel):

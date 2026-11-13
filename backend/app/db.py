@@ -90,6 +90,7 @@ def init_db() -> None:
         );
         CREATE TABLE IF NOT EXISTS contracts (
             id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
+            repository_id TEXT REFERENCES repositories(id),
             version INTEGER NOT NULL DEFAULT 1, state TEXT NOT NULL DEFAULT 'proposed',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, approved_at TEXT
         );
@@ -218,6 +219,9 @@ def init_db() -> None:
         for name, declaration in migrations.items():
             if name not in columns:
                 con.execute(f"ALTER TABLE agents ADD COLUMN {name} {declaration}")
+        contract_columns = {row[1] for row in con.execute("PRAGMA table_info(contracts)").fetchall()}
+        if "repository_id" not in contract_columns:
+            con.execute("ALTER TABLE contracts ADD COLUMN repository_id TEXT REFERENCES repositories(id)")
         con.execute("PRAGMA user_version=9")
 
 

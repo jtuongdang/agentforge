@@ -1138,14 +1138,18 @@ def add_repository(body: RepositoryCreate):
 
 
 @app.get("/api/contracts")
-def contracts():
-    with db.connect() as con:
-        return contracts_manager.list()
+def contracts(repository_id: str | None = None):
+    return contracts_manager.list(repository_id)
 
 
 @app.post("/api/contracts", status_code=201)
 def create_contract(body: ContractCreate):
-    return contracts_manager.propose(body.title, body.body)
+    if body.repository_id:
+        try:
+            repository(body.repository_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+    return contracts_manager.propose(body.title, body.body, body.repository_id)
 
 
 @app.post("/api/contracts/{contract_id}/approve")
@@ -1156,8 +1160,11 @@ def approve_contract(contract_id: str):
 
 
 @app.get("/api/tasks")
-def tasks(limit: int = 100):
-    return reporting.tasks(limit)
+def tasks(limit: int = 100, repository_id: str | None = None):
+    items = reporting.tasks(limit)
+    if repository_id:
+        return [item for item in items if item.get("repository_id") == repository_id]
+    return items
 
 
 @app.post("/api/tasks", status_code=202)

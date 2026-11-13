@@ -2833,3 +2833,35 @@ def test_schema_v7_migration_backs_up_before_remote_tables(tmp_path, monkeypatch
         assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='remote_devices'").fetchone()[0] == 1
 
 
+def test_contracts_support_repository_scoping(tmp_path, monkeypatch):
+    from app.contracts import ContractManager
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "contracts-scope.sqlite3")
+    monkeypatch.setattr(db, "DATA_ROOT", tmp_path / "data")
+    db.init_db()
+    with db.transaction() as con:
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('repo-1','Shoe Store',?)", (str(tmp_path / "repo1"),))
+        con.execute("INSERT INTO repositories(id,name,path) VALUES('repo-2','Clinic App',?)", (str(tmp_path / "repo2"),))
+
+    manager = ContractManager()
+    c_global = manager.propose("Global Style Guide", "Shared coding standards for all projects.")
+    c_repo1 = manager.propose("Shoe Cart API", "Cart endpoint payload for shoe store.", "repo-1")
+    c_repo2 = manager.propose("Patient Record API", "Patient intake payload for clinic app.", "repo-2")
+
+    assert c_global["repository_id"] is None
+    assert c_repo1["repository_id"] == "repo-1"
+    assert c_repo1["repository_name"] == "Shoe Store"
+
+    all_contracts = manager.list()
+    assert len(all_contracts) == 3
+
+    repo1_contracts = manager.list("repo-1")
+    repo1_ids = {item["id"] for item in repo1_contracts}
+    assert repo1_ids == {c_global["id"], c_repo1["id"]}
+
+    repo2_contracts = manager.list("repo-2")
+    repo2_ids = {item["id"] for item in repo2_contracts}
+    assert repo2_ids == {c_global["id"], c_repo2["id"]}
+
+
+

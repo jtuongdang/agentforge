@@ -38,6 +38,11 @@ Download [v0.1.0-alpha.4](https://github.com/jtuongdang/agentforge/releases/tag/
 | Windows x64 | [EXE](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.4/DevAgent-Orchestrator_0.1.0_windows-x64-setup.exe) or [MSI](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.4/DevAgent-Orchestrator_0.1.0_windows-x64.msi) |
 
 The release includes [SHA256SUMS](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.4/SHA256SUMS) and [INSTALL.md](https://github.com/jtuongdang/agentforge/releases/download/v0.1.0-alpha.4/INSTALL.md).
+Key updates in `v0.1.0-alpha.5` (Multi-Project Workspace Upgrade):
+- **Project Workspace Switcher**: Bộ chọn ngữ cảnh dự án trên thanh điều hướng (`Tất cả dự án` hoặc từng Repository riêng lẻ), lưu trạng thái qua phiên làm việc.
+- **Scoped Contracts (`repository_id`)**: CSDL và API hợp đồng (`/api/contracts`) hỗ trợ gắn hợp đồng riêng theo từng dự án hoặc đánh dấu `Global` dùng chung, loại bỏ tình trạng lẫn lộn hợp đồng khi quản lý nhiều dự án.
+- **Workspace-Filtered Tasks & Modals**: Danh sách Task, Lịch sử và các dropdown Hợp đồng/Dependencies khi tạo Task mới tự động lọc chính xác theo dự án đang chọn.
+
 Key updates in `v0.1.0-alpha.4`:
 - **Task Cards & Title UX**: Tách riêng dòng tiêu đề tác vụ, hiển thị trọn vẹn 100% bề ngang không bị cắt cụt hay che chữ (`word-break: break-word`).
 - **Sidebar Collapse**: Bổ sung nút thu nhỏ/mở rộng thanh bên trực quan trên thanh điều hướng topbar và đầu sidebar.
