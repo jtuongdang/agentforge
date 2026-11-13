@@ -18,11 +18,12 @@
         "minWidth": 1000,
         "minHeight": 680,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "devtools": true
       }
     ],
     "security": {
-      "csp": "default-src 'self' tauri: asset:; connect-src ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:*; img-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self' tauri: asset:; script-src 'self' 'unsafe-inline' tauri: asset:; connect-src ipc: http://ipc.localhost tauri: http://127.0.0.1:* ws://127.0.0.1:*; img-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {

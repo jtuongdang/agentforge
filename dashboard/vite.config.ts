@@ -6,6 +6,7 @@ const wsTarget = apiTarget.replace(/^http/, 'ws')
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: './',
   plugins: [react()],
   server: { host: '127.0.0.1', proxy: { '/api': apiTarget, '/ws': { target: wsTarget, ws: true } } },
 })
